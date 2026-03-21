@@ -78,6 +78,46 @@
   .btn-num { width: 20px; height: 20px; border-radius: 3px; background: rgba(74,144,217,0.3); display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 700; color: var(--accent); flex-shrink: 0; }
   .btn-prog { color: var(--text-dim); font-size: 10px; margin-left: auto; }
 
+  /* Programs tab */
+  .detail-tabs { display: flex; gap: 0; border-bottom: 1px solid var(--border); margin-bottom: 0; }
+  .detail-tab { padding: 7px 16px; font-size: 12px; font-weight: 600; cursor: pointer; color: var(--text-dim); border-bottom: 2px solid transparent; margin-bottom: -1px; user-select: none; }
+  .detail-tab:hover { color: var(--text); }
+  .detail-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+
+  /* Program view */
+  .prog-station { margin-bottom: 14px; }
+  .prog-station-name { font-size: 12px; font-weight: 700; color: var(--accent); padding: 6px 12px; background: var(--surface2); border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 6px; }
+  .prog-btn-row { border-bottom: 1px solid rgba(255,255,255,0.04); }
+  .prog-btn-row:last-child { border-bottom: none; }
+  .prog-btn-header { display: flex; align-items: center; gap: 8px; padding: 5px 12px; cursor: pointer; font-size: 12px; }
+  .prog-btn-header:hover { background: rgba(255,255,255,0.03); }
+  .prog-btn-header .btn-num { width: 20px; height: 20px; border-radius: 3px; background: rgba(74,144,217,0.3); display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 700; color: var(--accent); flex-shrink: 0; }
+  .prog-btn-header .btn-label { flex: 1; font-weight: 500; }
+  .prog-type-badge { font-size: 10px; padding: 1px 7px; border-radius: 10px; font-weight: 600; }
+  .prog-type-scene { background: rgba(74,144,217,0.2); color: #7ab4e8; }
+  .prog-type-toggle { background: rgba(92,184,92,0.2); color: #7ed47e; }
+  .prog-type-rl { background: rgba(240,160,48,0.2); color: #e8b060; }
+  .prog-type-cond { background: rgba(200,100,200,0.2); color: #d890d8; }
+  .prog-type-other { background: rgba(130,130,150,0.2); color: #a0a0c0; }
+  .prog-chevron { font-size: 10px; color: var(--text-dim); transition: transform 0.15s; }
+  .prog-chevron.open { transform: rotate(90deg); }
+  .prog-detail { display: none; padding: 6px 12px 10px 40px; font-size: 11px; }
+  .prog-detail.open { display: block; }
+  .prog-event-tabs { display: flex; gap: 0; margin-bottom: 8px; }
+  .prog-event-tab { padding: 3px 10px; font-size: 10px; cursor: pointer; color: var(--text-dim); border: 1px solid var(--border); border-right: none; background: var(--surface); }
+  .prog-event-tab:first-child { border-radius: 4px 0 0 4px; }
+  .prog-event-tab:last-child { border-right: 1px solid var(--border); border-radius: 0 4px 4px 0; }
+  .prog-event-tab.active { background: var(--accent2); color: #fff; border-color: var(--accent2); }
+  .prog-actions { font-family: monospace; font-size: 11px; line-height: 1.6; color: var(--text); }
+  .prog-actions .prog-line { padding: 1px 0; }
+  .prog-actions .prog-keyword { color: #c586c0; font-weight: 600; }
+  .prog-actions .prog-action { color: #9cdcfe; }
+  .prog-actions .prog-condition { color: #dcdcaa; }
+  .prog-actions .prog-indent { margin-left: 20px; }
+  .prog-no-data { color: var(--text-dim); font-size: 11px; font-style: italic; }
+
   .scene-grid { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px; }
   .scene-chip { background: var(--surface2); border: 1px solid var(--border); border-radius: 20px; padding: 3px 10px; font-size: 11px; display: flex; align-items: center; gap: 6px; }
   .scene-num { font-size: 10px; font-weight: 700; color: var(--text-dim); }
@@ -327,26 +367,64 @@ function renderNode(node, childMap, container, depth) {
 }
 
 // ── Detail panel ─────────────────────────────
+let activeDetailTab = 'zones';
+
 async function loadDetail(areaId, areaName) {
   const detail = document.getElementById('detail');
   detail.innerHTML = '<div class="loading">読み込み中...</div>';
-  const res = await fetch(`/api/area/${areaId}`);
-  if (!res.ok) { detail.innerHTML = '<div class="loading">エラー</div>'; return; }
-  const d = await res.json();
-  // Get area name from tree if not given
+
   if (!areaName) {
     const el = document.querySelector(`.tree-node[data-id="${areaId}"] .node-name`);
     areaName = el ? el.textContent : String(areaId);
   }
+
+  // Load zones/scenes/keypads and programs in parallel
+  const [areaRes, progRes] = await Promise.all([
+    fetch(`/api/area/${areaId}`),
+    fetch(`/api/area/${areaId}/programs`),
+  ]);
+  if (!areaRes.ok) { detail.innerHTML = '<div class="loading">エラー</div>'; return; }
+  const d = await areaRes.json();
+  const prog = progRes.ok ? await progRes.json() : {};
+
+  const tab = activeDetailTab;
   detail.innerHTML = `
-    <div style="font-size:15px;font-weight:600;padding:2px 0 4px">${areaName}</div>
-    ${renderZonesCard(d.zones, areaId)}
-    ${renderScenesCard(d.scenes)}
-    ${renderKeypadsCard(d.stations, d.buttons)}
+    <div style="font-size:15px;font-weight:600;padding:2px 0 6px">${areaName}</div>
+    <div class="card" style="overflow:visible">
+      <div class="detail-tabs">
+        <div class="detail-tab ${tab==='zones'?'active':''}" onclick="switchDetailTab('zones',${areaId},'${areaName.replace(/'/g,"\\'")}')">Zones</div>
+        <div class="detail-tab ${tab==='scenes'?'active':''}" onclick="switchDetailTab('scenes',${areaId},'${areaName.replace(/'/g,"\\'")}')">Scenes</div>
+        <div class="detail-tab ${tab==='keypads'?'active':''}" onclick="switchDetailTab('keypads',${areaId},'${areaName.replace(/'/g,"\\'")}')">Keypads</div>
+        <div class="detail-tab ${tab==='programs'?'active':''}" onclick="switchDetailTab('programs',${areaId},'${areaName.replace(/'/g,"\\'")}')">Programs</div>
+      </div>
+      <div id="tab-zones" class="tab-panel ${tab==='zones'?'active':''}">
+        ${d.zones.length ? zonesTableHtml(d.zones, areaId) : '<div class="loading" style="padding:16px">Zonesなし</div>'}
+      </div>
+      <div id="tab-scenes" class="tab-panel ${tab==='scenes'?'active':''}">
+        ${d.scenes.length ? scenesBodyHtml(d.scenes) : '<div class="loading" style="padding:16px">Scenesなし</div>'}
+      </div>
+      <div id="tab-keypads" class="tab-panel ${tab==='keypads'?'active':''}">
+        ${d.stations.length ? keypadsBodyHtml(d.stations, d.buttons) : '<div class="loading" style="padding:16px">Keypadsなし</div>'}
+      </div>
+      <div id="tab-programs" class="tab-panel ${tab==='programs'?'active':''}">
+        ${renderProgramsTab(prog)}
+      </div>
+    </div>
   `;
 }
 
-// ── Zones card ───────────────────────────────
+function switchDetailTab(tabName, areaId, areaName) {
+  activeDetailTab = tabName;
+  document.querySelectorAll('.detail-tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+  const tabs = document.querySelectorAll('.detail-tab');
+  const tabOrder = ['zones','scenes','keypads','programs'];
+  const idx = tabOrder.indexOf(tabName);
+  if (tabs[idx]) tabs[idx].classList.add('active');
+  document.getElementById('tab-' + tabName).classList.add('active');
+}
+
+// ── Zones ─────────────────────────────────────
 const CT = {1:{l:'Dimmer',c:'badge-dim'},7:{l:'CCO Maintained',c:'badge-cco'},8:{l:'CCO Pulsed',c:'badge-cco'},12:{l:'Shade',c:'badge-shade'},26:{l:'HVAC',c:'badge-hvac'}};
 const LAYERS = [{v:0,l:'Ambient',c:'layer-ambient'},{v:1,l:'Task',c:'layer-task'},{v:2,l:'Accent',c:'layer-accent'}];
 
@@ -355,8 +433,7 @@ function layerBadge(val) {
   return l ? `<span class="layer-badge ${l.c}">${l.l}</span>` : '';
 }
 
-function renderZonesCard(zones, areaId) {
-  if (!zones.length) return '';
+function zonesTableHtml(zones, areaId) {
   const rows = zones.map(z => {
     const ct = CT[z.ControlType] || {l:`Type ${z.ControlType}`,c:'badge-other'};
     const layerSel = `<select class="layer-select" onchange="patchZone(${z.ZoneID}, 'ZoneLayer', this.value, ${areaId})">
@@ -387,13 +464,19 @@ function renderZonesCard(zones, areaId) {
     ? `<button class="btn btn-outline" style="padding:2px 10px;font-size:11px;margin-left:8px" onclick="openAddZone(${areaId})">＋ Zone追加</button>`
     : '';
   const debugBtn = `<button class="btn btn-outline" style="padding:2px 8px;font-size:10px;margin-left:4px;opacity:0.5" onclick="showAreaDebug(${areaId})">🔍 DB比較</button>`;
-  return `<div class="card">
-    <div class="card-header">Loads / Zones <span class="count">${zones.length}</span>${addBtn}${debugBtn}
+  return `<div style="padding:0">
+    <div class="card-header" style="display:flex;align-items:center;gap:8px;padding:7px 12px;background:var(--surface2);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.8px;color:var(--text-dim);border-bottom:1px solid var(--border)">
+      Loads / Zones <span class="count">${zones.length}</span>${addBtn}${debugBtn}
       <span style="margin-left:auto;font-size:10px;color:var(--text-dim);font-weight:400;text-transform:none">名前・説明はクリックして編集</span>
     </div>
     <table><tr><th>Load#</th><th>Zone Name</th><th>Layer</th><th>Control Type</th><th>Load Type</th><th>Description</th><th></th></tr>${rows}</table>
     <div id="debug-panel-${areaId}" style="display:none;padding:10px;font-size:10px;font-family:monospace;white-space:pre-wrap;color:var(--text-dim);border-top:1px solid var(--border);max-height:400px;overflow-y:auto"></div>
   </div>`;
+}
+
+function renderZonesCard(zones, areaId) {
+  if (!zones.length) return '';
+  return `<div class="card">${zonesTableHtml(zones, areaId)}</div>`;
 }
 
 async function onEditBlur(cell) {
@@ -434,19 +517,22 @@ async function patchZone(zoneId, field, value, areaId, reload=true) {
   if (reload) await loadDetail(areaId, '');
 }
 
-// ── Scenes card ──────────────────────────────
-function renderScenesCard(scenes) {
-  if (!scenes.length) return '';
+// ── Scenes ────────────────────────────────────
+function scenesBodyHtml(scenes) {
   const chips = scenes.map(s => `<div class="scene-chip">
     <span class="scene-num ${s.Number===0?'scene-off':'scene-on'}">${s.Number===0?'Off':s.Number}</span>
     <span>${s.Name}</span></div>`).join('');
-  return `<div class="card"><div class="card-header">Scenes <span class="count">${scenes.length}</span></div><div class="scene-grid">${chips}</div></div>`;
+  return `<div class="scene-grid">${chips}</div>`;
+}
+function renderScenesCard(scenes) {
+  if (!scenes.length) return '';
+  return `<div class="card"><div class="card-header">Scenes <span class="count">${scenes.length}</span></div>${scenesBodyHtml(scenes)}</div>`;
 }
 
-// ── Keypads card ─────────────────────────────
+// ── Keypads ───────────────────────────────────
 const PROG = {'SAPM':'Scene','ATPM':'Toggle','SSRLPM':'Raise/Lower','MRLPM':'Master R/L','AdvanceConditionalProgrammingModel':'Conditional'};
-function renderKeypadsCard(stations, buttons) {
-  if (!stations.length) return '';
+
+function keypadsBodyHtml(stations, buttons) {
   const stMap = {};
   stations.forEach(s => { if (!stMap[s.ControlStationID]) stMap[s.ControlStationID]={name:s.Name,devId:s.ControlStationDeviceID,modelId:s.ModelInfoID}; });
   const btns = {};
@@ -457,7 +543,236 @@ function renderKeypadsCard(stations, buttons) {
       <span class="btn-prog">${PROG[b.ProgModel]||b.ProgModel||'─'}</span></div>`).join('');
     return `<div class="keypad-card"><div class="keypad-name">⌨ ${cs.name}<span style="color:var(--text-dim);font-size:10px;margin-left:auto">Model:${cs.modelId||'─'}</span></div><div class="keypad-body">${bl||'<div style="padding:6px 10px;color:var(--text-dim);font-size:11px">ボタンなし</div>'}</div></div>`;
   }).join('');
-  return `<div class="card"><div class="card-header">Control Stations <span class="count">${Object.keys(stMap).length}</span></div><div class="keypad-grid">${cards}</div></div>`;
+  return `<div class="keypad-grid">${cards}</div>`;
+}
+
+function renderKeypadsCard(stations, buttons) {
+  if (!stations.length) return '';
+  const stMap = {};
+  stations.forEach(s => { if (!stMap[s.ControlStationID]) stMap[s.ControlStationID]={name:s.Name,devId:s.ControlStationDeviceID,modelId:s.ModelInfoID}; });
+  return `<div class="card"><div class="card-header">Control Stations <span class="count">${Object.keys(stMap).length}</span></div>${keypadsBodyHtml(stations, buttons)}</div>`;
+}
+
+// ── Programs tab ─────────────────────────────
+const PROG_LABELS = {
+  'SAPM': 'Scene', 'ATPM': 'Toggle', 'SSRLPM': 'Raise/Lower',
+  'MRLPM': 'Master R/L', 'AdvanceConditionalProgrammingModel': 'Conditional',
+  'DAPM': 'Dimmer Action', 'CAPM': 'CCO Action',
+};
+const LED_LOGIC = {0:'None', 1:'Active', 2:'Scene', 3:'Occupied', 4:'TimeOfDay', 5:'Status', 6:'Variable'};
+const TRIGGER_TYPE = {1:'Press', 2:'Release', 3:'Double Tap', 4:'Hold', 5:'If (LED On)', 6:'Else'};
+const ACTION_OTYPE = {234:'Run', 235:'Delay', 233:'Conditional'};
+
+function progTypeBadge(progModel) {
+  if (!progModel) return '<span class="prog-type-badge prog-type-other">─</span>';
+  const m = PROG_LABELS[progModel] || progModel;
+  let cls = 'prog-type-other';
+  if (progModel === 'SAPM') cls = 'prog-type-scene';
+  else if (progModel === 'ATPM') cls = 'prog-type-toggle';
+  else if (progModel === 'SSRLPM' || progModel === 'MRLPM') cls = 'prog-type-rl';
+  else if (progModel === 'AdvanceConditionalProgrammingModel') cls = 'prog-type-cond';
+  return `<span class="prog-type-badge ${cls}">${m}</span>`;
+}
+
+function presetLabel(presetId, presetNames) {
+  if (!presetId) return '─';
+  const p = presetNames[presetId];
+  if (!p) return `ID:${presetId}`;
+  return p.name || `Scene ${p.number ?? presetId}`;
+}
+
+function renderProgramsTab(prog) {
+  if (!prog || !prog.stations || !prog.stations.length) {
+    return '<div class="prog-no-data" style="padding:16px">キーパッドなし</div>';
+  }
+
+  const btns = {};
+  (prog.buttons || []).forEach(b => {
+    if (!btns[b.ParentDeviceID]) btns[b.ParentDeviceID] = [];
+    btns[b.ParentDeviceID].push(b);
+  });
+  const stMap = {};
+  (prog.stations || []).forEach(s => {
+    if (!stMap[s.ControlStationID]) stMap[s.ControlStationID] = {name:s.StationName, devId:s.ControlStationDeviceID, modelId:s.ModelInfoID};
+  });
+
+  const pmDetails = prog.pm_details || {};
+  const presetNames = prog.preset_names || {};
+  const trigTrees = prog.trigger_trees || {};
+
+  let html = `<div style="padding:4px 12px;font-size:10px;color:var(--text-dim);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px">
+    <span style="margin-left:auto"></span>
+    <button class="btn btn-outline" style="padding:1px 8px;font-size:10px" onclick="showProgSchema()">🔍 DB Schema</button>
+  </div>`;
+
+  Object.entries(stMap).forEach(([stId, cs]) => {
+    const stBtns = btns[cs.devId] || [];
+    if (!stBtns.length) return;
+
+    html += `<div class="prog-station">
+      <div class="prog-station-name">⌨ ${cs.name}<span style="color:var(--text-dim);font-size:10px;margin-left:auto">Model:${cs.modelId||'─'}</span></div>`;
+
+    stBtns.forEach(b => {
+      const uid = `prog-${b.ButtonID}`;
+      const pmId = b.ProgrammingModelID;
+      const pm = pmId ? pmDetails[pmId] : null;
+
+      // Build summary line for header
+      let summary = '';
+      if (pm) {
+        const presetId = pm.PressPresetID || pm.PresetID;
+        if (presetId) summary = `Press → ${presetLabel(presetId, presetNames)}`;
+        else if (pm.ControlType !== undefined) summary = `Type:${pm.ControlType}`;
+      }
+
+      html += `<div class="prog-btn-row">
+        <div class="prog-btn-header" onclick="toggleProgDetail('${uid}')">
+          <div class="btn-num">${b.ButtonNumber+1}</div>
+          <span class="btn-label">${b.ButtonName}</span>
+          ${progTypeBadge(b.ProgModel)}
+          ${summary ? `<span style="font-size:10px;color:var(--text-dim);margin-left:6px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${summary}</span>` : '<span style="flex:1"></span>'}
+          <span class="prog-chevron" id="${uid}-chev">▶</span>
+        </div>
+        <div class="prog-detail" id="${uid}">
+          ${renderButtonProgramDetail(b, pm, presetNames, trigTrees)}
+        </div>
+      </div>`;
+    });
+
+    html += '</div>';
+  });
+
+  return html;
+}
+
+function renderButtonProgramDetail(b, pm, presetNames, trigTrees) {
+  if (!pm) return '<div class="prog-no-data">Programming Model データなし</div>';
+
+  let html = '';
+
+  // LED info row
+  const ledLogicLabel = LED_LOGIC[pm.LedLogic] ?? `${pm.LedLogic}`;
+  const ledRefLabel = pm.ReferencePresetIDForLed ? presetLabel(pm.ReferencePresetIDForLed, presetNames) : '─';
+  html += `<div style="display:flex;gap:16px;margin-bottom:8px;font-size:11px;padding:4px 0;border-bottom:1px solid rgba(255,255,255,0.06)">
+    <span><span style="color:var(--text-dim)">LED Logic:</span> <span style="color:var(--teal)">${ledLogicLabel}</span></span>
+    <span><span style="color:var(--text-dim)">LED Based on:</span> <span style="color:var(--teal)">${ledRefLabel}</span></span>
+    ${pm.AllowDoubleTap ? '<span style="color:var(--text-dim)">Double Tap ✓</span>' : ''}
+    ${pm.HoldTime ? `<span style="color:var(--text-dim)">Hold: ${pm.HoldTime}ms</span>` : ''}
+  </div>`;
+
+  // Try to find the trigger tree for this button's PM
+  // Key by ButtonGroupID (ParentID when ParentType=57) or by PM ID directly
+  const tree = trigTrees[pm.ParentID] || trigTrees[pm.ProgrammingModelID] || null;
+
+  if (tree && tree.length) {
+    html += '<div class="prog-actions">';
+    tree.forEach(trig => {
+      const tLabel = TRIGGER_TYPE[trig.TriggerType] || `Event:${trig.TriggerType}`;
+      // Only show events that have actions
+      if (!trig.actions.length) return;
+      html += `<div class="prog-line"><span class="prog-keyword">${tLabel}</span></div>`;
+      html += renderActionList(trig.actions, presetNames, 1);
+    });
+    html += '</div>';
+  } else {
+    // Fallback: show simple preset-based actions from PM fields
+    const simpleEvents = [
+      {label:'Press',     presetId: pm.PressPresetID || pm.PresetID, color:'#9cdcfe'},
+      {label:'Release',   presetId: pm.ReleasePresetID,               color:'#c586c0'},
+      {label:'Double Tap',presetId: pm.DoubleTapPresetID,             color:'#dcdcaa'},
+      {label:'Hold',      presetId: pm.HoldPresetId,                  color:'#e8b060'},
+      {label:'On',        presetId: pm.OnPresetID,                    color:'#5cb85c'},
+      {label:'Off',       presetId: pm.OffPresetID,                   color:'#d9534f'},
+    ].filter(e => e.presetId);
+
+    if (simpleEvents.length) {
+      html += '<div class="prog-actions">';
+      simpleEvents.forEach(e => {
+        const label = presetLabel(e.presetId, presetNames);
+        html += `<div class="prog-line">
+          <span class="prog-keyword" style="color:${e.color};min-width:80px;display:inline-block">${e.label}</span>
+          <span style="color:var(--text-dim)">Run </span><span class="prog-action">${label}</span>
+        </div>`;
+      });
+      html += '</div>';
+    } else {
+      html += `<div class="prog-no-data" style="margin-top:4px">${pm.Name} — アクションデータが見つかりませんでした</div>`;
+    }
+  }
+
+  return html;
+}
+
+function renderActionList(actions, presetNames, depth) {
+  if (!actions || !actions.length) return '';
+  const pad = depth * 16;
+  let html = '';
+
+  actions.forEach(act => {
+    if (act.ObjectType === 235) {
+      // Delay
+      html += `<div class="prog-line" style="padding-left:${pad}px"><span class="prog-keyword">Delay</span> <span style="color:var(--text-dim)">${act.DelayTime}ms</span></div>`;
+    } else if (act.ObjectType === 233) {
+      // Conditional If/Then/Else/End If
+      const subTrigs = act.sub_triggers || [];
+      const thenBranch = subTrigs.filter(st => st.TriggerType === 5);
+      const elseBranch = subTrigs.filter(st => st.TriggerType === 6);
+      const condText = act.Notes ? act.Notes : `(condition)`;
+      html += `<div class="prog-line" style="padding-left:${pad}px"><span class="prog-keyword">If</span> <span class="prog-condition">${condText}</span> <span class="prog-keyword">Then</span> <button onclick="inspectCondition(${act.ActionID})" style="font-size:9px;padding:0 4px;background:rgba(255,255,255,0.1);border:none;color:var(--text-dim);cursor:pointer;border-radius:3px">🔍</button></div>`;
+      thenBranch.forEach(st => { html += renderActionList(st.actions, presetNames, depth + 1); });
+      if (elseBranch.length) {
+        html += `<div class="prog-line" style="padding-left:${pad}px"><span class="prog-keyword">Else</span></div>`;
+        elseBranch.forEach(st => { html += renderActionList(st.actions, presetNames, depth + 1); });
+      }
+      html += `<div class="prog-line" style="padding-left:${pad}px"><span class="prog-keyword">End If</span></div>`;
+    } else {
+      // Run / Stop action
+      const label = presetLabel(act.PresetId, presetNames);
+      const execType = act.ExecutionType === 1 ? 'Run' : 'Stop';
+      html += `<div class="prog-line" style="padding-left:${pad}px"><span style="color:var(--text-dim)">${execType} </span><span class="prog-action">${label}</span></div>`;
+    }
+  });
+
+  return html;
+}
+
+function toggleProgDetail(uid) {
+  const el = document.getElementById(uid);
+  const chev = document.getElementById(uid + '-chev');
+  if (!el) return;
+  const isOpen = el.classList.toggle('open');
+  if (chev) chev.classList.toggle('open', isOpen);
+}
+
+async function inspectCondition(actionId) {
+  const res = await fetch(`/api/conditional-detail/${actionId}`);
+  const d = await res.json();
+  let out = `=== Conditional Action ID: ${actionId} ===\n\n`;
+  out += `カラム: ${(d.action_columns || []).join(', ')}\n\n`;
+  out += `Action データ:\n${JSON.stringify(d.action, null, 2)}\n\n`;
+  out += `Sub-Triggers:\n${JSON.stringify(d.sub_triggers, null, 2)}\n`;
+  showTextModal(`Conditional Action #${actionId}`, out);
+}
+
+async function showProgSchema() {
+  const res = await fetch('/api/programming-schema');
+  const d = await res.json();
+  let out = '=== プログラミング関連テーブル ===\n\n';
+  Object.entries(d).forEach(([tbl, info]) => {
+    out += `━━━ [${tbl}] ━━━\n`;
+    out += `  カラム: ${(info.columns||[]).join(', ')}\n`;
+    if ((info.sample||[]).length > 0) {
+      out += `  サンプル(最大5件):\n`;
+      info.sample.forEach(row => {
+        if (row.__error__) out += `    エラー: ${row.__error__}\n`;
+        else out += `    ${JSON.stringify(row)}\n`;
+      });
+    } else {
+      out += `  (データなし)\n`;
+    }
+    out += '\n';
+  });
+  showTextModal('プログラミングSchema詳細', out);
 }
 
 // ── Add Zone ─────────────────────────────────

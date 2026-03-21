@@ -975,6 +975,357 @@ def zone_cross_table(zone_id):
     })
 
 
+def _build_trigger_tree(trigger_rows, preset_ids, depth=0):
+    """Recursively build trigger→action tree, collecting preset IDs along the way."""
+    if not trigger_rows or depth > 5:
+        return []
+
+    trig_ids = [r["TriggerID"] for r in trigger_rows]
+    ph = ",".join("?" * len(trig_ids))
+
+    action_rows = _try_q(f"""
+        SELECT ActionID, ObjectType, ParentID, SortOrder,
+               DelayTime, ExecutionType, PresetId, Notes
+        FROM tblAction
+        WHERE ParentID IN ({ph}) AND ParentType = 232
+        ORDER BY ParentID, SortOrder
+    """, trig_ids)
+
+    actions_by_trig = {}
+    cond_action_ids = []
+    if action_rows and not action_rows[0].get("__error__"):
+        for r in action_rows:
+            k = r["ParentID"]
+            if k not in actions_by_trig:
+                actions_by_trig[k] = []
+            act = {
+                "ActionID": r["ActionID"],
+                "ObjectType": r["ObjectType"],
+                "SortOrder": r["SortOrder"],
+                "DelayTime": r["DelayTime"],
+                "ExecutionType": r["ExecutionType"],
+                "PresetId": r["PresetId"],
+                "Notes": r["Notes"],
+                "sub_triggers": [],
+            }
+            if r.get("PresetId"):
+                preset_ids.add(r["PresetId"])
+            if r["ObjectType"] == 233:
+                cond_action_ids.append(r["ActionID"])
+            actions_by_trig[k].append(act)
+
+    # For conditional actions, recursively get sub-triggers
+    if cond_action_ids:
+        ph2 = ",".join("?" * len(cond_action_ids))
+        sub_trig_rows = _try_q(f"""
+            SELECT TriggerID, TriggerType, ParentId, SortOrder
+            FROM tblTrigger
+            WHERE ParentId IN ({ph2})
+            ORDER BY ParentId, TriggerType, SortOrder
+        """, cond_action_ids)
+
+        if sub_trig_rows and not sub_trig_rows[0].get("__error__"):
+            by_cond = {}
+            for r in sub_trig_rows:
+                k = r["ParentId"]
+                if k not in by_cond:
+                    by_cond[k] = []
+                by_cond[k].append({"TriggerID": r["TriggerID"], "TriggerType": r["TriggerType"],
+                                    "SortOrder": r["SortOrder"], "actions": []})
+
+            # Recursively build sub-trees and attach
+            for cond_id, sub_trigs in by_cond.items():
+                sub_tree = _build_trigger_tree(sub_trigs, preset_ids, depth + 1)
+                # Attach back to the conditional action
+                for trig_id, acts in actions_by_trig.items():
+                    for act in acts:
+                        if act["ActionID"] == cond_id:
+                            act["sub_triggers"] = sub_tree
+
+    # Build result
+    result = []
+    for trig in trigger_rows:
+        trig_id = trig["TriggerID"]
+        result.append({
+            "TriggerID": trig_id,
+            "TriggerType": trig["TriggerType"],
+            "SortOrder": trig.get("SortOrder", 0),
+            "actions": actions_by_trig.get(trig_id, []),
+        })
+    return result
+
+
+@app.route("/api/conditional-detail/<int:action_id>")
+def conditional_detail(action_id):
+    """Return all columns of a conditional action and its sub-triggers for condition text research."""
+    if not state["db_name"]:
+        return jsonify({"error": "DB未接続"}), 400
+    act = _try_q("SELECT * FROM tblAction WHERE ActionID = ?", (action_id,))
+    # Get all columns of tblAction
+    cols = _try_q("""
+        SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_NAME = 'tblAction' ORDER BY ORDINAL_POSITION
+    """)
+    sub_trigs = _try_q("""
+        SELECT * FROM tblTrigger WHERE ParentId = ? ORDER BY TriggerType
+    """, (action_id,))
+    return jsonify({
+        "action_columns": [c["COLUMN_NAME"] for c in (cols or [])],
+        "action": act[0] if act else None,
+        "sub_triggers": sub_trigs,
+    })
+
+
+@app.route("/api/programming-schema")
+def programming_schema():
+    """Explore all programming-related tables in the database."""
+    if not state["db_name"]:
+        return jsonify({"error": "DB未接続"}), 400
+
+    prog_tables = _try_q("""
+        SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES
+        WHERE TABLE_TYPE='BASE TABLE'
+        AND (TABLE_NAME LIKE '%Program%'
+             OR TABLE_NAME LIKE '%Action%'
+             OR TABLE_NAME LIKE '%Event%'
+             OR TABLE_NAME LIKE '%Condition%'
+             OR TABLE_NAME LIKE '%Button%'
+             OR TABLE_NAME LIKE '%Trigger%'
+             OR TABLE_NAME LIKE '%Step%'
+             OR TABLE_NAME LIKE '%Sequence%')
+        ORDER BY TABLE_NAME
+    """)
+
+    result = {}
+    for tbl_row in prog_tables:
+        name = tbl_row["TABLE_NAME"]
+        cols = _try_q(f"""
+            SELECT COLUMN_NAME, DATA_TYPE
+            FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_NAME = N'{name}'
+            ORDER BY ORDINAL_POSITION
+        """)
+        sample = _try_q(f"SELECT TOP 5 * FROM [{name}]")
+        result[name] = {
+            "columns": [c["COLUMN_NAME"] for c in cols],
+            "sample": sample,
+        }
+
+    return jsonify(result)
+
+
+@app.route("/api/button/<int:button_id>/program")
+def button_program(button_id):
+    """Get programming details for a specific button."""
+    if not state["db_name"]:
+        return jsonify({"error": "DB未接続"}), 400
+
+    button = _try_q("""
+        SELECT kb.ButtonID, kb.ButtonNumber, kb.Name as ButtonName,
+               kb.ParentDeviceID, kb.ProgrammingModelID,
+               pm.Name as ProgModel, pm.ControlType as ProgControlType, pm.PresetID
+        FROM tblKeypadButton kb
+        LEFT JOIN tblProgrammingModel pm ON kb.ProgrammingModelID = pm.ProgrammingModelID
+        WHERE kb.ButtonID = ?
+    """, (button_id,))
+
+    pm_id = button[0]["ProgrammingModelID"] if button else None
+
+    # Try to get events/steps from various potential table names
+    events = []
+    action_steps = []
+    conditions = []
+
+    if pm_id:
+        # Try common Lutron programming table patterns
+        for tbl in ["tblKeypadButtonEvent", "tblButtonEvent", "tblProgrammingModelEvent"]:
+            rows = _try_q(f"""
+                SELECT t.* FROM INFORMATION_SCHEMA.TABLES
+                WHERE TABLE_NAME = N'{tbl}' AND TABLE_TYPE='BASE TABLE'
+            """)
+            if rows and not rows[0].get("__error__"):
+                events = _try_q(f"SELECT * FROM [{tbl}] WHERE ProgrammingModelID = ?", (pm_id,))
+                if events and not events[0].get("__error__"):
+                    break
+
+        for tbl in ["tblActionStep", "tblProgramStep", "tblActionGroup", "tblProgrammingStep"]:
+            rows = _try_q(f"""
+                SELECT t.* FROM INFORMATION_SCHEMA.TABLES t
+                WHERE TABLE_NAME = N'{tbl}' AND TABLE_TYPE='BASE TABLE'
+            """)
+            if rows and not rows[0].get("__error__"):
+                action_steps = _try_q(f"SELECT * FROM [{tbl}] WHERE ProgrammingModelID = ?", (pm_id,))
+                if action_steps and not action_steps[0].get("__error__"):
+                    break
+
+        for tbl in ["tblConditional", "tblConditionGroup", "tblProgrammingCondition"]:
+            rows = _try_q(f"""
+                SELECT t.* FROM INFORMATION_SCHEMA.TABLES t
+                WHERE TABLE_NAME = N'{tbl}' AND TABLE_TYPE='BASE TABLE'
+            """)
+            if rows and not rows[0].get("__error__"):
+                conditions = _try_q(f"SELECT * FROM [{tbl}] WHERE ProgrammingModelID = ?", (pm_id,))
+                if conditions and not conditions[0].get("__error__"):
+                    break
+
+    return jsonify({
+        "button": button[0] if button else None,
+        "events": events,
+        "action_steps": action_steps,
+        "conditions": conditions,
+    })
+
+
+@app.route("/api/area/<int:area_id>/programs")
+def area_programs(area_id):
+    """Get all button programming for keypads in an area."""
+    if not state["db_name"]:
+        return jsonify({})
+
+    stations = q("""
+        SELECT cs.ControlStationID, cs.Name as StationName,
+               csd.ControlStationDeviceID, csd.Name as DeviceName, csd.ModelInfoID
+        FROM tblControlStation cs
+        LEFT JOIN tblControlStationDevice csd ON csd.ParentControlStationID = cs.ControlStationID
+        WHERE cs.ParentId = ? AND cs.ParentType = 2
+        ORDER BY cs.SortOrder, cs.Name
+    """, (area_id,))
+
+    station_ids = list({s["ControlStationDeviceID"] for s in stations if s["ControlStationDeviceID"]})
+    if not station_ids:
+        return jsonify({"stations": stations, "buttons": [], "pm_details": {}, "preset_names": {}})
+
+    ph = ",".join("?" * len(station_ids))
+    buttons = q(f"""
+        SELECT kb.ButtonID, kb.ButtonNumber, kb.Name as ButtonName,
+               kb.ParentDeviceID, kb.ProgrammingModelID,
+               pm.Name as ProgModel, pm.ControlType as ProgControlType
+        FROM tblKeypadButton kb
+        LEFT JOIN tblProgrammingModel pm ON kb.ProgrammingModelID = pm.ProgrammingModelID
+        WHERE kb.ParentDeviceID IN ({ph})
+        ORDER BY kb.ParentDeviceID, kb.ButtonNumber
+    """, station_ids)
+
+    pm_ids = list({b["ProgrammingModelID"] for b in buttons if b["ProgrammingModelID"]})
+
+    # Fetch full ProgrammingModel details for all buttons
+    pm_details = {}
+    if pm_ids:
+        ph2 = ",".join("?" * len(pm_ids))
+        pm_rows = _try_q(f"""
+            SELECT ProgrammingModelID, Name, LedLogic, UseReverseLedLogic,
+                   PresetID, PressPresetID, ReleasePresetID, HoldPresetId,
+                   DoubleTapPresetID, OnPresetID, OffPresetID,
+                   ReferencePresetIDForLed, AllowDoubleTap, HoldTime,
+                   HeldButtonAction, ControlType, VariableId, Direction,
+                   ThreeWayToggle, ParentID, ParentType
+            FROM tblProgrammingModel
+            WHERE ProgrammingModelID IN ({ph2})
+        """, pm_ids)
+        if pm_rows and not pm_rows[0].get("__error__"):
+            for r in pm_rows:
+                pm_details[r["ProgrammingModelID"]] = r
+
+    # Collect all referenced preset IDs to look up names
+    preset_id_set = set()
+    for pm in pm_details.values():
+        for field in ["PresetID", "PressPresetID", "ReleasePresetID", "HoldPresetId",
+                      "DoubleTapPresetID", "OnPresetID", "OffPresetID", "ReferencePresetIDForLed"]:
+            if pm.get(field):
+                preset_id_set.add(pm[field])
+
+    # Try to get preset names from tblScene (scenes are "actions" in LD terminology)
+    preset_names = {}
+    if preset_id_set:
+        ph3 = ",".join("?" * len(preset_id_set))
+        preset_list = list(preset_id_set)
+        # tblScene: SceneID may match PresetID in programming models
+        scene_rows = _try_q(f"""
+            SELECT s.SceneID, s.Name, s.Number, sc.Name as ControllerName
+            FROM tblScene s
+            JOIN tblSceneController sc ON s.ParentSceneControllerID = sc.SceneControllerID
+            WHERE s.SceneID IN ({ph3})
+        """, preset_list)
+        if scene_rows and not scene_rows[0].get("__error__"):
+            for r in scene_rows:
+                preset_names[r["SceneID"]] = {"name": r["Name"], "number": r["Number"], "controller": r["ControllerName"]}
+
+        # Also try tblPreset directly for any remaining IDs
+        missing = [pid for pid in preset_list if pid not in preset_names]
+        if missing:
+            ph4 = ",".join("?" * len(missing))
+            preset_rows = _try_q(f"""
+                SELECT PresetID, Name FROM tblPreset WHERE PresetID IN ({ph4})
+            """, missing)
+            if preset_rows and not preset_rows[0].get("__error__"):
+                for r in preset_rows:
+                    if r["PresetID"] not in preset_names:
+                        preset_names[r["PresetID"]] = {"name": r.get("Name", str(r["PresetID"])), "number": None, "controller": None}
+
+    # Build trigger trees for all PM parents (ButtonGroup IDs and direct PM IDs)
+    # Try both: ButtonGroup parent IDs and direct PM IDs as trigger parents
+    parent_ids_to_try = set()
+    for pm in pm_details.values():
+        if pm.get("ParentID"):
+            parent_ids_to_try.add(pm["ParentID"])  # ButtonGroup ID
+    parent_ids_to_try.update(pm_ids)  # Also try PM IDs directly
+
+    trigger_trees = {}  # parent_id -> [trigger tree]
+    if parent_ids_to_try:
+        ph_p = ",".join("?" * len(parent_ids_to_try))
+        root_trig_rows = _try_q(f"""
+            SELECT TriggerID, TriggerType, ParentId, SortOrder
+            FROM tblTrigger
+            WHERE ParentId IN ({ph_p})
+            ORDER BY ParentId, SortOrder
+        """, list(parent_ids_to_try))
+
+        if root_trig_rows and not root_trig_rows[0].get("__error__"):
+            by_parent = {}
+            for r in root_trig_rows:
+                k = r["ParentId"]
+                if k not in by_parent:
+                    by_parent[k] = []
+                by_parent[k].append({"TriggerID": r["TriggerID"], "TriggerType": r["TriggerType"],
+                                      "SortOrder": r["SortOrder"], "actions": []})
+
+            for parent_id, trigs in by_parent.items():
+                tree = _build_trigger_tree(trigs, preset_id_set)
+                trigger_trees[parent_id] = tree
+
+    # Fetch any remaining preset names collected during tree build
+    if preset_id_set:
+        missing_presets = [pid for pid in preset_id_set if pid not in preset_names]
+        if missing_presets:
+            ph_m = ",".join("?" * len(missing_presets))
+            s2 = _try_q(f"""
+                SELECT s.SceneID, s.Name, s.Number, sc.Name as ControllerName
+                FROM tblScene s
+                JOIN tblSceneController sc ON s.ParentSceneControllerID = sc.SceneControllerID
+                WHERE s.SceneID IN ({ph_m})
+            """, missing_presets)
+            if s2 and not s2[0].get("__error__"):
+                for r in s2:
+                    preset_names[r["SceneID"]] = {"name": r["Name"], "number": r["Number"], "controller": r["ControllerName"]}
+            # Also try tblPreset for any still missing
+            still_missing = [pid for pid in missing_presets if pid not in preset_names]
+            if still_missing:
+                ph_sm = ",".join("?" * len(still_missing))
+                pr = _try_q(f"SELECT PresetID, Name FROM tblPreset WHERE PresetID IN ({ph_sm})", still_missing)
+                if pr and not pr[0].get("__error__"):
+                    for r in pr:
+                        if r["PresetID"] not in preset_names:
+                            preset_names[r["PresetID"]] = {"name": r.get("Name", str(r["PresetID"])), "number": None, "controller": None}
+
+    return jsonify({
+        "stations": stations,
+        "buttons": buttons,
+        "pm_details": pm_details,
+        "preset_names": preset_names,
+        "trigger_trees": trigger_trees,
+    })
+
+
 @app.route("/api/zone-full-compare/<int:existing_id>/<int:new_id>")
 def zone_full_compare(existing_id, new_id):
     """Full column-by-column comparison between two zones and their SwitchLegs."""
