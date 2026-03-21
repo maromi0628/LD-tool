@@ -101,6 +101,16 @@
   /* Layer select dropdown */
   select.layer-select { background: var(--surface2); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 2px 4px; font-size: 11px; cursor: pointer; }
 
+  /* Add Zone modal */
+  .modal-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.55); z-index:200; }
+  .modal-overlay.show { display:flex; align-items:center; justify-content:center; }
+  .modal-box { background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:20px; width:420px; max-width:95vw; display:flex; flex-direction:column; gap:12px; }
+  .modal-box h3 { font-size:14px; font-weight:700; color:var(--text); }
+  .modal-box label { font-size:11px; color:var(--text-dim); margin-bottom:2px; display:block; }
+  .modal-box input, .modal-box select { width:100%; background:var(--surface2); color:var(--text); border:1px solid var(--border); border-radius:4px; padding:6px 8px; font-size:12px; }
+  .modal-box input:focus, .modal-box select:focus { outline:2px solid var(--accent); }
+  .modal-actions { display:flex; gap:8px; justify-content:flex-end; margin-top:4px; }
+
   /* Template switcher */
   #template-bar { background: var(--surface2); border-bottom: 1px solid var(--border); padding: 4px 14px; display: none; align-items: center; gap: 8px; font-size: 11px; color: var(--text-dim); }
   #template-bar label { white-space: nowrap; }
@@ -146,12 +156,60 @@
 
 <div id="toast"></div>
 
+<!-- Text output modal (copyable) -->
+<div class="modal-overlay" id="text-modal-overlay" onclick="if(event.target===this)closeTextModal()">
+  <div class="modal-box" style="width:700px;max-width:95vw">
+    <h3 id="text-modal-title">結果</h3>
+    <textarea id="text-modal-body" readonly style="width:100%;height:400px;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:8px;font-size:11px;font-family:monospace;resize:vertical"></textarea>
+    <div class="modal-actions">
+      <button class="btn btn-outline" onclick="copyTextModal()">📋 コピー</button>
+      <button class="btn btn-primary" onclick="closeTextModal()">閉じる</button>
+    </div>
+  </div>
+</div>
+
+<!-- Add Zone modal -->
+<div class="modal-overlay" id="add-zone-overlay" onclick="if(event.target===this)closeAddZone()">
+  <div class="modal-box">
+    <h3>Zone を追加</h3>
+    <div>
+      <label>Zone Name</label>
+      <input type="text" id="az-name" placeholder="例: Bed DL">
+    </div>
+    <div>
+      <label>Load Type</label>
+      <select id="az-load-type" size="1"></select>
+    </div>
+    <div>
+      <label>Zone Layer</label>
+      <select id="az-layer">
+        <option value="0">Ambient</option>
+        <option value="1">Task</option>
+        <option value="2">Accent</option>
+        <option value="4">Internal</option>
+      </select>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-outline" onclick="closeAddZone()">キャンセル</button>
+      <button class="btn btn-primary" id="az-submit-btn" onclick="submitAddZone()">追加</button>
+    </div>
+    <input type="hidden" id="az-overlay-area" value="">
+  </div>
+</div>
+
 <script>
 let isPl = false;
 let isDirty = false;
 let currentAreaId = null;
 let allTemplates = [];   // [{id, name}] from SQLite
 let fsTemplates = [];    // [filename] from filesystem
+let loadTypesCache = []; // [{LoadTypeID, Description, ControlType}]
+
+// ControlType labels for grouping
+const CT_GROUPS = {
+  1: 'Dimmed', 2: 'Switched', 5: 'Shade', 6: 'Fan',
+  7: 'CCO Maintained', 8: 'CCO Pulsed', 9: 'HVAC', 10: 'Venetian Blind'
+};
 
 // ── Open file/folder ─────────────────────────
 async function openFile(mode) {
@@ -305,6 +363,10 @@ function renderZonesCard(zones, areaId) {
       ${LAYERS.map(l => `<option value="${l.v}" ${l.v===z.ZoneLayer?'selected':''}>${l.l}</option>`).join('')}
       <option value="4" ${z.ZoneLayer===4?'selected':''}>Internal</option>
     </select>`;
+    const loadTypeLabel = z.LoadTypeDesc || `ID:${z.LoadType ?? '─'}`;
+    const delBtn = isPl
+      ? `<button class="btn btn-danger" style="padding:1px 7px;font-size:11px" onclick="deleteZone(${z.ZoneID}, '${z.Name.replace(/'/g,"\\'")}', ${areaId})">✕</button>`
+      : '';
     return `<tr>
       <td style="color:var(--text-dim);text-align:center;width:50px">${z.LoadNumber}</td>
       <td class="editable" contenteditable="true"
@@ -313,17 +375,24 @@ function renderZonesCard(zones, areaId) {
           style="font-weight:500">${z.Name}<span class="edit-hint">✎</span></td>
       <td>${layerSel}</td>
       <td><span class="badge ${ct.c}">${ct.l}</span></td>
+      <td style="font-size:11px;color:var(--text-dim)">${loadTypeLabel}</td>
       <td class="editable" contenteditable="true"
           data-zone="${z.ZoneID}" data-field="ZoneDescription" data-area="${areaId}"
           onblur="onEditBlur(this)"
           style="color:var(--text-dim)">${z.ZoneDescription||''}<span class="edit-hint">✎</span></td>
+      <td style="width:40px;text-align:center">${delBtn}</td>
     </tr>`;
   }).join('');
+  const addBtn = isPl
+    ? `<button class="btn btn-outline" style="padding:2px 10px;font-size:11px;margin-left:8px" onclick="openAddZone(${areaId})">＋ Zone追加</button>`
+    : '';
+  const debugBtn = `<button class="btn btn-outline" style="padding:2px 8px;font-size:10px;margin-left:4px;opacity:0.5" onclick="showAreaDebug(${areaId})">🔍 DB比較</button>`;
   return `<div class="card">
-    <div class="card-header">Loads / Zones <span class="count">${zones.length}</span>
+    <div class="card-header">Loads / Zones <span class="count">${zones.length}</span>${addBtn}${debugBtn}
       <span style="margin-left:auto;font-size:10px;color:var(--text-dim);font-weight:400;text-transform:none">名前・説明はクリックして編集</span>
     </div>
-    <table><tr><th>Load#</th><th>Zone Name</th><th>Layer</th><th>Type</th><th>Description</th></tr>${rows}</table>
+    <table><tr><th>Load#</th><th>Zone Name</th><th>Layer</th><th>Control Type</th><th>Load Type</th><th>Description</th><th></th></tr>${rows}</table>
+    <div id="debug-panel-${areaId}" style="display:none;padding:10px;font-size:10px;font-family:monospace;white-space:pre-wrap;color:var(--text-dim);border-top:1px solid var(--border);max-height:400px;overflow-y:auto"></div>
   </div>`;
 }
 
@@ -389,6 +458,300 @@ function renderKeypadsCard(stations, buttons) {
     return `<div class="keypad-card"><div class="keypad-name">⌨ ${cs.name}<span style="color:var(--text-dim);font-size:10px;margin-left:auto">Model:${cs.modelId||'─'}</span></div><div class="keypad-body">${bl||'<div style="padding:6px 10px;color:var(--text-dim);font-size:11px">ボタンなし</div>'}</div></div>`;
   }).join('');
   return `<div class="card"><div class="card-header">Control Stations <span class="count">${Object.keys(stMap).length}</span></div><div class="keypad-grid">${cards}</div></div>`;
+}
+
+// ── Add Zone ─────────────────────────────────
+async function openAddZone(areaId) {
+  // Load types (cached)
+  if (!loadTypesCache.length) {
+    const res = await fetch('/api/load-types');
+    loadTypesCache = await res.json();
+  }
+  // Build grouped select
+  const sel = document.getElementById('az-load-type');
+  const groups = {};
+  loadTypesCache.forEach(lt => {
+    const g = CT_GROUPS[lt.ControlType] || 'Other';
+    if (!groups[g]) groups[g] = [];
+    groups[g].push(lt);
+  });
+  sel.innerHTML = Object.entries(groups).map(([gname, items]) =>
+    `<optgroup label="${gname}">${items.map(lt =>
+      `<option value="${lt.LoadTypeID}">${lt.Description}</option>`
+    ).join('')}</optgroup>`
+  ).join('');
+  // Default to first Dimmed type
+  const firstDimmed = loadTypesCache.find(lt => lt.ControlType === 1);
+  if (firstDimmed) sel.value = firstDimmed.LoadTypeID;
+
+  document.getElementById('az-name').value = '';
+  document.getElementById('az-overlay-area').value = areaId;
+  document.getElementById('add-zone-overlay').classList.add('show');
+  document.getElementById('az-name').focus();
+}
+
+function closeAddZone() {
+  document.getElementById('add-zone-overlay').classList.remove('show');
+}
+
+async function submitAddZone() {
+  const name = document.getElementById('az-name').value.trim();
+  if (!name) { document.getElementById('az-name').focus(); return; }
+  const areaId = parseInt(document.getElementById('az-overlay-area').value);
+  const loadType = parseInt(document.getElementById('az-load-type').value);
+  const zoneLayer = parseInt(document.getElementById('az-layer').value);
+
+  const btn = document.getElementById('az-submit-btn');
+  btn.disabled = true; btn.textContent = '追加中...';
+  try {
+    const res = await fetch('/api/zone', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({area_id: areaId, name, load_type: loadType, zone_layer: zoneLayer})
+    });
+    const d = await res.json();
+    if (!res.ok) { toast(d.error || '追加失敗', 'red'); return; }
+    closeAddZone();
+    isDirty = true;
+    document.getElementById('save-btn').disabled = !isPl;
+    const db = document.getElementById('dirty-badge');
+    if (!db) {
+      const bar = document.getElementById('place-bar');
+      const span = document.createElement('span');
+      span.id = 'dirty-badge';
+      span.style.cssText = 'display:inline-block;background:var(--orange);color:#000;font-size:10px;font-weight:700;padding:1px 7px;border-radius:10px;';
+      span.textContent = '● 未保存';
+      bar.appendChild(span);
+    }
+    toast(`Zone "${name}" を追加しました`);
+    await loadDetail(areaId, '');
+  } finally {
+    btn.disabled = false; btn.textContent = '追加';
+  }
+}
+
+// ── Area debug/compare ────────────────────────
+async function showAreaDebug(areaId) {
+  const panel = document.getElementById(`debug-panel-${areaId}`);
+  if (panel.style.display !== 'none') { panel.style.display = 'none'; return; }
+  panel.style.display = 'block';
+  panel.innerHTML = '<span style="color:var(--text-dim)">読み込み中...</span>';
+  const res = await fetch(`/api/area/${areaId}/debug`);
+  const d = await res.json();
+  let html = '';
+  (d.zones || []).forEach(zd => {
+    const z = zd.zone;
+    const sl_i = zd.switchleg_by_id_plus1;  // correct LD format: SwitchLegID = ZoneID+1
+    const sl_p = zd.switchleg_by_parentid;  // wrong format: ParentID = ZoneID
+    // Detect bad SwitchLeg: ParentID should equal areaId, not zoneId
+    const slOk = sl_i.length > 0 && sl_i[0].ParentID === z.ParentID;
+    const hasBadSl = sl_p.length > 0 && sl_p[0].ParentID === z.ZoneID;
+    const statusIcon = slOk ? '✓' : (hasBadSl ? '⚠ SwitchLeg破損' : '✗ SwitchLegなし');
+    const statusColor = slOk ? 'var(--green)' : 'var(--orange)';
+    html += `<div style="margin-bottom:6px">`;
+    html += `<span style="color:${statusColor}">${statusIcon}</span> `;
+    html += `<b>${z.Name}</b> (ZoneID:${z.ZoneID})<br>`;
+    if (sl_i.length) {
+      const sl = sl_i[0];
+      html += `  SwitchLeg ID=${sl.SwitchLegID}, ParentID=${sl.ParentID} ${sl.ParentID===z.ParentID?'(正常)':'(異常: AreaID='+z.ParentID+'にすべき)'}, LoadType=${sl.LoadType}<br>`;
+    } else {
+      html += `  SwitchLeg(ZoneID+1): なし<br>`;
+    }
+    if (hasBadSl && isPl) {
+      html += `  <button class="btn btn-danger" style="margin-top:3px;padding:1px 8px;font-size:10px" onclick="fixSwitchLeg(${z.ZoneID}, ${areaId})">🔧 SwitchLeg ParentIDを修正</button><br>`;
+    }
+    html += `</div>`;
+  });
+  // Extra diagnostic buttons
+  const zones = d.zones || [];
+  let extraBtns = `<div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">
+    <button class="btn btn-outline" style="padding:2px 8px;font-size:10px" onclick="inspectSchema()">📋 テーブル一覧</button>
+    <button class="btn btn-outline" style="padding:2px 8px;font-size:10px" onclick="checkDbIntegrity()">🔍 DB整合性確認</button>`;
+  if (zones.length >= 2) {
+    const id1 = zones[0].zone.ZoneID, id2 = zones[zones.length-1].zone.ZoneID;
+    extraBtns += `<button class="btn btn-outline" style="padding:2px 8px;font-size:10px" onclick="fullCompareZones(${id1},${id2})">🔬 全カラム比較</button>`;
+    extraBtns += `<button class="btn btn-outline" style="padding:2px 8px;font-size:10px" onclick="crossTableCompare(${id1},${id2})">🗂 関連テーブル比較</button>`;
+    extraBtns += `<button class="btn btn-outline" style="padding:2px 8px;font-size:10px" onclick="checkProblemTables(${id1},${id2})">🔎 問題テーブル確認</button>`;
+  }
+  extraBtns += `</div>`;
+  panel.innerHTML = (html || '(データなし)') + extraBtns;
+}
+
+function showTextModal(title, text) {
+  document.getElementById('text-modal-title').textContent = title;
+  document.getElementById('text-modal-body').value = text;
+  document.getElementById('text-modal-overlay').classList.add('show');
+}
+function closeTextModal() {
+  document.getElementById('text-modal-overlay').classList.remove('show');
+}
+function copyTextModal() {
+  const ta = document.getElementById('text-modal-body');
+  ta.select();
+  document.execCommand('copy');
+  toast('コピーしました');
+}
+
+async function checkDbIntegrity() {
+  const res = await fetch('/api/db-integrity');
+  const d = await res.json();
+  let out = '=== tblGuidManager カラム ===\n';
+  out += (d.guid_manager_columns || []).join(', ') + '\n';
+  out += '\n=== tblGuidManager サンプル(3件) ===\n';
+  (d.guid_manager_sample || []).forEach(r => {
+    if (r.__error__) { out += '  エラー: ' + r.__error__ + '\n'; return; }
+    out += '  ' + JSON.stringify(r) + '\n';
+  });
+  out += '\n=== tblNextObjectID ===\n';
+  (d.next_object_id || []).forEach(r => {
+    if (r.__error__) { out += '  エラー: ' + r.__error__ + '\n'; return; }
+    out += '  ' + JSON.stringify(r) + '\n';
+  });
+  out += '\n=== tblZone/tblSwitchLegのトリガー ===\n';
+  (d.triggers_on_zone_switchleg || []).forEach(r => {
+    out += `  ${r.name} on ${r.table_name}\n`;
+  });
+  if ((d.triggers_on_zone_switchleg||[]).length === 0) out += '  なし\n';
+  out += '\n=== tblZone/SwitchLeg の外部キー制約 ===\n';
+  (d.fk_constraints || []).forEach(r => {
+    out += `  ${r.constraint_name}: ${r.parent_table}.${r.parent_col} → ${r.ref_table}.${r.ref_col}\n`;
+  });
+  if ((d.fk_constraints||[]).length === 0) out += '  なし\n';
+  showTextModal('DB整合性確認', out);
+}
+
+async function inspectSchema() {
+  const res = await fetch('/api/schema-inspect');
+  const d = await res.json();
+  let out = '=== ZoneIDを参照しているテーブル/カラム ===\n';
+  (d.zone_related_columns || []).forEach(c => {
+    out += `  ${c.TABLE_NAME}.${c.COLUMN_NAME} (${c.DATA_TYPE})\n`;
+  });
+  out += `\n=== 全テーブル(${(d.all_tables||[]).length}件) ===\n`;
+  out += (d.all_tables || []).join('\n');
+  showTextModal('テーブル一覧', out);
+}
+
+async function fullCompareZones(existingId, newId) {
+  const res = await fetch(`/api/zone-full-compare/${existingId}/${newId}`);
+  const d = await res.json();
+  const z1 = d.existing_zone || {};
+  const z2 = d.new_zone || {};
+  const sl1 = d.existing_switchleg || {};
+  const sl2 = d.new_switchleg || {};
+  const allKeys = [...new Set([...Object.keys(z1), ...Object.keys(z2)])];
+  let out = `=== tblZone比較 (既存:${existingId} vs 新:${newId}) ===\n`;
+  allKeys.forEach(k => {
+    const v1 = z1[k], v2 = z2[k];
+    const diff = String(v1) !== String(v2) ? ' ← 差異' : '';
+    out += `  ${k}: ${v1} | ${v2}${diff}\n`;
+  });
+  const slKeys = [...new Set([...Object.keys(sl1), ...Object.keys(sl2)])];
+  out += `\n=== tblSwitchLeg比較 ===\n`;
+  slKeys.forEach(k => {
+    const v1 = sl1[k], v2 = sl2[k];
+    const diff = String(v1) !== String(v2) ? ' ← 差異' : '';
+    out += `  ${k}: ${v1} | ${v2}${diff}\n`;
+  });
+  showTextModal('全カラム比較', out);
+}
+
+async function crossTableCompare(existingId, newId) {
+  const [r1, r2] = await Promise.all([
+    fetch(`/api/zone-cross-table/${existingId}`).then(r => r.json()),
+    fetch(`/api/zone-cross-table/${newId}`).then(r => r.json()),
+  ]);
+  const tableKeys = Object.keys(r1);
+  let out = `=== 関連テーブル比較 (既存:${existingId} vs 新:${newId}) ===\n\n`;
+  tableKeys.forEach(tbl => {
+    const rows1 = r1[tbl] || [];
+    const rows2 = r2[tbl] || [];
+    const cnt1 = rows1.length, cnt2 = rows2.length;
+    const mark = cnt1 !== cnt2 ? ' ← 件数差異!' : '';
+    out += `[${tbl}] 既存:${cnt1}件 / 新:${cnt2}件${mark}\n`;
+    if (cnt1 > 0) {
+      rows1.forEach(r => { out += `  既存: ${JSON.stringify(r)}\n`; });
+    }
+    if (cnt2 > 0) {
+      rows2.forEach(r => { out += `  新規: ${JSON.stringify(r)}\n`; });
+    }
+  });
+  showTextModal('関連テーブル比較', out);
+}
+
+async function checkProblemTables(existingId, newId) {
+  const tables = ['tblDaylightable','tblFixtureGroup','tblObjectToProcessorMap'];
+  let out = `=== 問題テーブル詳細確認 ===\n`;
+  out += `既存ZoneID: ${existingId}  新ZoneID: ${newId}\n\n`;
+  for (const tbl of tables) {
+    const r = await fetch(`/api/table-schema/${tbl}`).then(x => x.json());
+    out += `━━━ [${tbl}] ━━━\n`;
+    if ((r.columns||[]).length === 0) { out += '  ⚠ テーブルが存在しないか取得不可\n\n'; continue; }
+    out += `  カラム: ${(r.columns||[]).map(c=>c.COLUMN_NAME).join(', ')}\n`;
+    out += `  全サンプル(TOP3):\n`;
+    if ((r.sample||[]).length === 0) { out += '    (0件 - テーブルは空)\n'; }
+    else if (r.sample[0].__error__) { out += `    エラー: ${r.sample[0].__error__}\n`; }
+    else { r.sample.forEach(s => { out += `    ${JSON.stringify(s)}\n`; }); }
+    out += '\n';
+  }
+  // Also check all tables for any entries referencing existingId or newId
+  out += `\n=== 全テーブル検索: ZoneID/SwitchLegID参照 ===\n`;
+  const schemaR = await fetch('/api/schema-inspect').then(x => x.json());
+  const zoneCols = schemaR.zone_related_columns || [];
+  // Group by table
+  const byTable = {};
+  zoneCols.forEach(c => { if (!byTable[c.TABLE_NAME]) byTable[c.TABLE_NAME] = []; byTable[c.TABLE_NAME].push(c.COLUMN_NAME); });
+  for (const [tbl, cols] of Object.entries(byTable)) {
+    if (['tblZone','tblSwitchLeg','tblZonable'].includes(tbl)) continue; // already checked
+    for (const col of cols) {
+      const ids = [existingId, existingId+1, existingId+2, existingId+3, newId, newId+1, newId+2, newId+3];
+      const r2 = await fetch(`/api/table-search`, {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({table: tbl, column: col, ids})
+      }).then(x => x.json());
+      if (r2.rows && r2.rows.length > 0) {
+        out += `  [${tbl}].${col}:\n`;
+        r2.rows.forEach(row => { out += `    ${JSON.stringify(row)}\n`; });
+      }
+    }
+  }
+  showTextModal('問題テーブル確認', out);
+}
+
+async function fixSwitchLeg(zoneId, areaId) {
+  const res = await fetch(`/api/zone/${zoneId}/fix-switchleg`, { method: 'POST' });
+  const d = await res.json();
+  if (!res.ok) { toast(d.error || '修正失敗', 'red'); return; }
+  isDirty = true;
+  document.getElementById('save-btn').disabled = !isPl;
+  toast('SwitchLeg ParentIDを修正しました');
+  await showAreaDebug(areaId);  // refresh debug panel
+  // Force refresh
+  const panel = document.getElementById(`debug-panel-${areaId}`);
+  panel.style.display = 'none';
+  await showAreaDebug(areaId);
+}
+
+// ── Delete Zone ───────────────────────────────
+async function deleteZone(zoneId, zoneName, areaId) {
+  if (!confirm(`Zone "${zoneName}" を削除しますか？`)) return;
+  const res = await fetch(`/api/zone/${zoneId}`, { method: 'DELETE' });
+  const d = await res.json();
+  if (!res.ok) { toast(d.error || '削除失敗', 'red'); return; }
+  isDirty = true;
+  document.getElementById('save-btn').disabled = !isPl;
+  const db = document.getElementById('dirty-badge');
+  if (!db) {
+    const bar = document.getElementById('place-bar');
+    const span = document.createElement('span');
+    span.id = 'dirty-badge';
+    span.style.cssText = 'display:inline-block;background:var(--orange);color:#000;font-size:10px;font-weight:700;padding:1px 7px;border-radius:10px;';
+    span.textContent = '● 未保存';
+    bar.appendChild(span);
+  }
+  toast(`Zone "${zoneName}" を削除しました`);
+  await loadDetail(areaId, '');
 }
 
 // ── Save ─────────────────────────────────────
