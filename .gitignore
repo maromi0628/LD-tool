@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Project data files (not source code)
+tool test/
+tool test.zip
+
+# Temp files
+*.lut
+*.mdf
+*.ldf
