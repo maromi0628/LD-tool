@@ -6,249 +6,124 @@
 <title>Lutron Designer Viewer</title>
 <style>
   :root {
-    --bg: #1a1a1e;
-    --surface: #242428;
-    --surface2: #2e2e34;
-    --border: #3a3a42;
-    --accent: #4a90d9;
-    --accent2: #2d6bb3;
-    --text: #e0e0e8;
-    --text-dim: #888896;
-    --green: #5cb85c;
-    --orange: #f0a030;
-    --red: #d9534f;
-    --teal: #5bc0de;
+    --bg: #1a1a1e; --surface: #242428; --surface2: #2e2e34;
+    --border: #3a3a42; --accent: #4a90d9; --accent2: #2d6bb3;
+    --text: #e0e0e8; --text-dim: #888896;
+    --green: #5cb85c; --orange: #f0a030; --red: #d9534f; --teal: #5bc0de;
   }
-
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif; font-size: 13px; height: 100vh; display: flex; flex-direction: column; }
 
-  /* ── Header ── */
-  header {
-    background: var(--surface);
-    border-bottom: 1px solid var(--border);
-    padding: 10px 16px;
-    display: flex; align-items: center; gap: 12px;
-  }
-  header h1 { font-size: 15px; font-weight: 600; color: var(--text); }
-  header .logo { color: var(--accent); font-weight: 700; font-size: 16px; letter-spacing: 0.5px; }
+  header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 8px 14px; display: flex; align-items: center; gap: 10px; }
+  header .logo { color: var(--accent); font-weight: 700; font-size: 16px; }
+  header h1 { font-size: 14px; font-weight: 600; }
   header .spacer { flex: 1; }
+  .btn-group { display: flex; gap: 6px; }
 
-  /* ── Place info bar ── */
-  #place-bar {
-    background: var(--surface2);
-    border-bottom: 1px solid var(--border);
-    padding: 7px 16px;
-    display: flex; align-items: center; gap: 16px;
-    font-size: 12px; color: var(--text-dim);
-    min-height: 34px;
-  }
-  #place-bar .info-item { display: flex; gap: 5px; }
-  #place-bar .info-label { color: var(--text-dim); }
+  #place-bar { background: var(--surface2); border-bottom: 1px solid var(--border); padding: 6px 14px; display: flex; align-items: center; gap: 14px; font-size: 12px; color: var(--text-dim); min-height: 32px; flex-wrap: wrap; }
+  #place-bar .info-item { display: flex; gap: 4px; }
   #place-bar .info-value { color: var(--text); font-weight: 500; }
+  #dirty-badge { display: none; background: var(--orange); color: #000; font-size: 10px; font-weight: 700; padding: 1px 7px; border-radius: 10px; }
 
-  /* ── Main layout ── */
   .main { flex: 1; display: flex; overflow: hidden; }
 
-  /* ── Left: Area tree ── */
-  #sidebar {
-    width: 240px; min-width: 180px; max-width: 360px;
-    background: var(--surface);
-    border-right: 1px solid var(--border);
-    display: flex; flex-direction: column;
-    overflow: hidden;
-    resize: horizontal;
-  }
-  #sidebar-header {
-    padding: 10px 12px 8px;
-    font-size: 11px; font-weight: 600; text-transform: uppercase;
-    letter-spacing: 0.8px; color: var(--text-dim);
-    border-bottom: 1px solid var(--border);
-  }
-  #area-tree { flex: 1; overflow-y: auto; padding: 6px 0; }
+  #sidebar { width: 220px; background: var(--surface); border-right: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; }
+  #sidebar-header { padding: 8px 12px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.8px; color: var(--text-dim); border-bottom: 1px solid var(--border); }
+  #area-tree { flex: 1; overflow-y: auto; padding: 4px 0; }
 
-  .tree-node {
-    display: flex; align-items: center; gap: 6px;
-    padding: 5px 10px 5px;
-    cursor: pointer; user-select: none;
-    border-left: 3px solid transparent;
-    transition: background 0.12s;
-  }
+  .tree-node { display: flex; align-items: center; gap: 6px; padding: 5px 10px; cursor: pointer; user-select: none; border-left: 3px solid transparent; }
   .tree-node:hover { background: var(--surface2); }
   .tree-node.selected { background: rgba(74,144,217,0.15); border-left-color: var(--accent); }
-  .tree-node .node-icon { font-size: 14px; flex-shrink: 0; }
+  .tree-node .node-icon { font-size: 13px; flex-shrink: 0; }
   .tree-node .node-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .tree-node .node-leaf { color: #4db6ac; font-size: 10px; }
-  .tree-indent { display: inline-block; width: 16px; flex-shrink: 0; }
+  .tree-node .node-leaf { color: #4db6ac; font-size: 9px; }
 
-  /* ── Right: Detail panel ── */
-  #detail {
-    flex: 1; overflow-y: auto;
-    padding: 16px;
-    display: flex; flex-direction: column; gap: 16px;
-  }
+  #detail { flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 14px; }
+  .welcome { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; color: var(--text-dim); }
+  .welcome .icon { font-size: 40px; opacity: 0.25; }
 
-  .welcome {
-    flex: 1; display: flex; flex-direction: column;
-    align-items: center; justify-content: center;
-    gap: 12px; color: var(--text-dim);
-  }
-  .welcome .icon { font-size: 48px; opacity: 0.3; }
-  .welcome p { font-size: 13px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+  .card-header { background: var(--surface2); padding: 7px 12px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.8px; color: var(--text-dim); border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; }
+  .card-header .count { background: var(--accent2); color: #fff; font-size: 10px; padding: 1px 6px; border-radius: 10px; font-weight: 700; }
 
-  /* ── Section cards ── */
-  .card {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    overflow: hidden;
-  }
-  .card-header {
-    background: var(--surface2);
-    padding: 8px 14px;
-    font-size: 11px; font-weight: 600;
-    text-transform: uppercase; letter-spacing: 0.8px;
-    color: var(--text-dim);
-    border-bottom: 1px solid var(--border);
-    display: flex; align-items: center; gap: 8px;
-  }
-  .card-header .count {
-    background: var(--accent2); color: #fff;
-    font-size: 10px; padding: 1px 6px; border-radius: 10px;
-    font-weight: 700;
-  }
-
-  /* ── Tables ── */
   table { width: 100%; border-collapse: collapse; font-size: 12px; }
-  th {
-    background: rgba(0,0,0,0.2);
-    text-align: left; padding: 6px 10px;
-    color: var(--text-dim); font-weight: 600;
-    font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;
-    border-bottom: 1px solid var(--border);
-  }
-  td { padding: 6px 10px; border-bottom: 1px solid rgba(255,255,255,0.04); vertical-align: middle; }
+  th { background: rgba(0,0,0,0.2); text-align: left; padding: 5px 10px; color: var(--text-dim); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid var(--border); }
+  td { padding: 5px 10px; border-bottom: 1px solid rgba(255,255,255,0.04); vertical-align: middle; }
   tr:last-child td { border-bottom: none; }
   tr:hover td { background: rgba(255,255,255,0.03); }
 
-  /* ── Badges ── */
-  .badge {
-    display: inline-block; padding: 2px 7px; border-radius: 10px;
-    font-size: 10px; font-weight: 600; letter-spacing: 0.3px;
-  }
+  /* Editable cells */
+  .editable { cursor: text; position: relative; }
+  .editable:hover { background: rgba(74,144,217,0.08) !important; outline: 1px solid var(--accent2); border-radius: 2px; }
+  .editable:focus { outline: 2px solid var(--accent); border-radius: 2px; background: rgba(74,144,217,0.12) !important; }
+  .edit-hint { font-size: 9px; color: var(--text-dim); margin-left: 4px; opacity: 0; transition: opacity 0.15s; }
+  tr:hover .edit-hint { opacity: 1; }
+
+  .badge { display: inline-block; padding: 2px 6px; border-radius: 10px; font-size: 10px; font-weight: 600; }
   .badge-dim { background: rgba(74,144,217,0.2); color: #7ab4e8; }
   .badge-cco { background: rgba(240,160,48,0.2); color: #e8b060; }
   .badge-shade { background: rgba(91,192,222,0.2); color: #7dd0e8; }
   .badge-hvac { background: rgba(92,184,92,0.2); color: #7ed47e; }
   .badge-other { background: rgba(150,150,170,0.2); color: #aaaacc; }
-
-  .layer-badge {
-    display: inline-block; padding: 1px 6px; border-radius: 3px;
-    font-size: 10px;
-  }
+  .layer-badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 10px; cursor: pointer; }
   .layer-ambient { background: rgba(255,220,80,0.2); color: #f0d060; }
   .layer-task    { background: rgba(200,140,255,0.2); color: #c89ce0; }
   .layer-accent  { background: rgba(255,120,80,0.2);  color: #f08060; }
   .layer-other   { background: rgba(130,130,150,0.2); color: #a0a0c0; }
 
-  /* ── Keypad section ── */
-  .keypad-grid { display: flex; flex-wrap: wrap; gap: 12px; padding: 12px; }
-  .keypad-card {
-    background: var(--surface2);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    min-width: 180px;
-    flex: 1;
-  }
-  .keypad-name {
-    padding: 8px 12px;
-    font-size: 11px; font-weight: 600;
-    color: var(--accent);
-    border-bottom: 1px solid var(--border);
-    display: flex; align-items: center; gap: 6px;
-  }
-  .keypad-body { padding: 6px 0; }
-  .btn-row {
-    display: flex; align-items: center; gap: 8px;
-    padding: 4px 12px;
-    font-size: 11px;
-  }
-  .btn-num {
-    width: 22px; height: 22px; border-radius: 4px;
-    background: rgba(74,144,217,0.3);
-    display: flex; align-items: center; justify-content: center;
-    font-size: 10px; font-weight: 700; color: var(--accent);
-    flex-shrink: 0;
-  }
+  .keypad-grid { display: flex; flex-wrap: wrap; gap: 10px; padding: 10px; }
+  .keypad-card { background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; min-width: 160px; flex: 1; }
+  .keypad-name { padding: 7px 10px; font-size: 11px; font-weight: 600; color: var(--accent); border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 6px; }
+  .btn-row { display: flex; align-items: center; gap: 8px; padding: 3px 10px; font-size: 11px; }
+  .btn-num { width: 20px; height: 20px; border-radius: 3px; background: rgba(74,144,217,0.3); display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 700; color: var(--accent); flex-shrink: 0; }
   .btn-prog { color: var(--text-dim); font-size: 10px; margin-left: auto; }
 
-  /* ── Scene grid ── */
-  .scene-grid { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px; }
-  .scene-chip {
-    background: var(--surface2); border: 1px solid var(--border);
-    border-radius: 20px; padding: 4px 12px;
-    font-size: 11px; display: flex; align-items: center; gap: 6px;
-  }
-  .scene-num {
-    font-size: 10px; font-weight: 700;
-    color: var(--text-dim); min-width: 16px;
-  }
-  .scene-off { color: var(--red); }
-  .scene-on  { color: var(--teal); }
+  .scene-grid { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px; }
+  .scene-chip { background: var(--surface2); border: 1px solid var(--border); border-radius: 20px; padding: 3px 10px; font-size: 11px; display: flex; align-items: center; gap: 6px; }
+  .scene-num { font-size: 10px; font-weight: 700; color: var(--text-dim); }
+  .scene-off { color: var(--red); } .scene-on { color: var(--teal); }
 
-  /* ── Buttons ── */
-  .btn {
-    padding: 7px 16px; border-radius: 5px; border: none;
-    cursor: pointer; font-size: 12px; font-weight: 600;
-    transition: opacity 0.15s;
-  }
+  .btn { padding: 6px 14px; border-radius: 5px; border: none; cursor: pointer; font-size: 12px; font-weight: 600; transition: opacity 0.15s; }
   .btn:hover { opacity: 0.85; }
   .btn-primary { background: var(--accent); color: #fff; }
   .btn-outline { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
+  .btn-success { background: var(--green); color: #fff; }
+  .btn-danger  { background: var(--red); color: #fff; }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
-  /* ── Loading ── */
-  .loading { color: var(--text-dim); font-size: 12px; padding: 20px; text-align: center; }
+  .loading { color: var(--text-dim); font-size: 12px; padding: 16px; text-align: center; }
+  ::-webkit-scrollbar { width: 5px; } ::-webkit-scrollbar-track { background: transparent; } ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 
-  /* ── Scrollbar ── */
-  ::-webkit-scrollbar { width: 6px; height: 6px; }
-  ::-webkit-scrollbar-track { background: transparent; }
-  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-  ::-webkit-scrollbar-thumb:hover { background: #555566; }
+  /* Toast */
+  #toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: #333; color: #fff; padding: 8px 18px; border-radius: 20px; font-size: 12px; opacity: 0; transition: opacity 0.3s; pointer-events: none; z-index: 999; }
+  #toast.show { opacity: 1; }
 
-  #no-template-msg {
-    padding: 8px 14px; font-size: 11px; color: var(--orange);
-    border-bottom: 1px solid var(--border); display: none;
-  }
+  /* Layer select dropdown */
+  select.layer-select { background: var(--surface2); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 2px 4px; font-size: 11px; cursor: pointer; }
 </style>
 </head>
 <body>
 
-<!-- ── Header ── -->
 <header>
   <span class="logo">LD</span>
   <h1>Lutron Designer Viewer</h1>
   <div class="spacer"></div>
-  <button class="btn btn-primary" onclick="selectFolder()">📁 フォルダを開く</button>
+  <div class="btn-group">
+    <button class="btn btn-primary" onclick="openFile('pl')">📄 .plを開く</button>
+    <button class="btn btn-outline" onclick="openFile('folder')">📁 フォルダを開く</button>
+    <button class="btn btn-success" id="save-btn" onclick="saveFile()" disabled>💾 保存</button>
+  </div>
 </header>
 
-<!-- ── Place info bar ── -->
 <div id="place-bar">
-  <span style="color:var(--text-dim)">フォルダを選択してください</span>
+  <span style="color:var(--text-dim)">ファイルまたはフォルダを選択してください</span>
 </div>
 
-<div id="no-template-msg">⚠ テンプレートDBの読み込みに失敗しました。PlaceCache.sqlite のみ表示します。</div>
-
-<!-- ── Main ── -->
 <div class="main">
-  <!-- Left: tree -->
   <div id="sidebar">
     <div id="sidebar-header">エリア</div>
-    <div id="area-tree">
-      <div class="loading">─</div>
-    </div>
+    <div id="area-tree"><div class="loading">─</div></div>
   </div>
-
-  <!-- Right: detail -->
   <div id="detail">
     <div class="welcome">
       <div class="icon">🏨</div>
@@ -257,60 +132,61 @@
   </div>
 </div>
 
-<script>
-let selectedAreaId = null;
+<div id="toast"></div>
 
-// ─── Folder selection ───────────────────────
-async function selectFolder() {
-  const res = await fetch('/api/select-folder', { method: 'POST' });
-  if (!res.ok) {
-    const e = await res.json();
-    alert(e.error || 'エラー');
-    return;
-  }
+<script>
+let isPl = false;
+let isDirty = false;
+let currentAreaId = null;
+
+// ── Open file/folder ─────────────────────────
+async function openFile(mode) {
+  const res = await fetch('/api/open', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({mode})
+  });
+  if (!res.ok) { const e = await res.json(); toast(e.error || 'エラー', 'red'); return; }
   const data = await res.json();
-  if (!data.has_template) {
-    document.getElementById('no-template-msg').style.display = 'block';
-  } else {
-    document.getElementById('no-template-msg').style.display = 'none';
-  }
+  isPl = data.is_pl;
+  document.getElementById('save-btn').disabled = !isPl;
   await loadOverview();
   await loadTree();
+  if (currentAreaId) loadDetail(currentAreaId, '');
+  toast(`${data.name} を開きました`);
 }
 
-// ─── Overview / Place bar ───────────────────
+// ── Overview bar ─────────────────────────────
 async function loadOverview() {
   const res = await fetch('/api/overview');
   if (!res.ok) return;
   const d = await res.json();
-  const p = d.place;
-  const a = d.address;
+  const p = d.place, a = d.address;
+  isDirty = d.dirty;
   const bar = document.getElementById('place-bar');
   bar.innerHTML = `
-    <div class="info-item"><span class="info-label">Place:</span><span class="info-value">${p.name || '─'}</span></div>
-    <div class="info-item"><span class="info-label">TimeZone:</span><span class="info-value">${p.timeZone || '─'}</span></div>
-    <div class="info-item"><span class="info-label">Location:</span><span class="info-value">${a.city || '─'}, ${a.country || '─'}</span></div>
-    <div class="info-item"><span class="info-label">Templates:</span><span class="info-value">${d.templates.length}</span></div>
-    <div class="info-item"><span class="info-label">Rooms:</span><span class="info-value">${d.systems.length}</span></div>
+    <div class="info-item"><span class="info-label" style="color:var(--text-dim)">Place:</span><span class="info-value">${p.name||'─'}</span></div>
+    <div class="info-item"><span class="info-label" style="color:var(--text-dim)">TimeZone:</span><span class="info-value">${p.timeZone||'─'}</span></div>
+    <div class="info-item"><span class="info-label" style="color:var(--text-dim)">Location:</span><span class="info-value">${a.city||'─'}, ${a.country||'─'}</span></div>
+    <div class="info-item"><span class="info-label" style="color:var(--text-dim)">Templates:</span><span class="info-value">${d.templates.length}</span></div>
+    <div class="info-item"><span class="info-label" style="color:var(--text-dim)">Rooms:</span><span class="info-value">${d.systems.length}</span></div>
+    ${d.dirty ? '<span id="dirty-badge" style="display:inline-block">● 未保存</span>' : ''}
   `;
+  document.getElementById('save-btn').disabled = !isPl || !isDirty;
 }
 
-// ─── Area tree ──────────────────────────────
+// ── Area tree ────────────────────────────────
 async function loadTree() {
   const res = await fetch('/api/areas');
   if (!res.ok) { document.getElementById('area-tree').innerHTML = '<div class="loading">テンプレートなし</div>'; return; }
   const areas = await res.json();
+  if (!areas.length) { document.getElementById('area-tree').innerHTML = '<div class="loading">エリアなし</div>'; return; }
   renderTree(areas);
 }
 
 function renderTree(areas) {
-  // Build parent→children map
   const childMap = {};
-  areas.forEach(a => {
-    if (!childMap[a.ParentID]) childMap[a.ParentID] = [];
-    childMap[a.ParentID].push(a);
-  });
-
+  areas.forEach(a => { if (!childMap[a.ParentID]) childMap[a.ParentID]=[]; childMap[a.ParentID].push(a); });
   const roots = areas.filter(a => a.HierarchyLevel === 2);
   const container = document.getElementById('area-tree');
   container.innerHTML = '';
@@ -320,148 +196,166 @@ function renderTree(areas) {
 function renderNode(node, childMap, container, depth) {
   const children = childMap[node.AreaID] || [];
   const isLeaf = node.IsLeaf === 1 || children.length === 0;
-
   const el = document.createElement('div');
   el.className = 'tree-node';
   el.dataset.id = node.AreaID;
-  el.style.paddingLeft = (10 + depth * 16) + 'px';
-
-  const icon = isLeaf ? '🏠' : '📂';
-  el.innerHTML = `
-    <span class="node-icon">${icon}</span>
-    <span class="node-name">${node.Name}</span>
-    ${isLeaf ? '<span class="node-leaf">●</span>' : ''}
-  `;
-
+  el.style.paddingLeft = (10 + depth * 14) + 'px';
+  el.innerHTML = `<span class="node-icon">${isLeaf ? '🏠' : '📂'}</span><span class="node-name">${node.Name}</span>${isLeaf ? '<span class="node-leaf">●</span>' : ''}`;
   el.addEventListener('click', () => {
     document.querySelectorAll('.tree-node').forEach(n => n.classList.remove('selected'));
     el.classList.add('selected');
-    if (isLeaf) loadDetail(node.AreaID, node.Name);
-    else loadDetail(node.AreaID, node.Name);
+    currentAreaId = node.AreaID;
+    loadDetail(node.AreaID, node.Name);
   });
-
   container.appendChild(el);
   children.forEach(c => renderNode(c, childMap, container, depth + 1));
 }
 
-// ─── Detail panel ───────────────────────────
+// ── Detail panel ─────────────────────────────
 async function loadDetail(areaId, areaName) {
-  selectedAreaId = areaId;
   const detail = document.getElementById('detail');
   detail.innerHTML = '<div class="loading">読み込み中...</div>';
-
   const res = await fetch(`/api/area/${areaId}`);
   if (!res.ok) { detail.innerHTML = '<div class="loading">エラー</div>'; return; }
   const d = await res.json();
-  renderDetail(areaName, d);
-}
-
-function renderDetail(name, d) {
-  const detail = document.getElementById('detail');
+  // Get area name from tree if not given
+  if (!areaName) {
+    const el = document.querySelector(`.tree-node[data-id="${areaId}"] .node-name`);
+    areaName = el ? el.textContent : String(areaId);
+  }
   detail.innerHTML = `
-    <div style="font-size:16px;font-weight:600;color:var(--text);padding:2px 0 4px">${name}</div>
-    ${renderZonesCard(d.zones)}
+    <div style="font-size:15px;font-weight:600;padding:2px 0 4px">${areaName}</div>
+    ${renderZonesCard(d.zones, areaId)}
     ${renderScenesCard(d.scenes)}
     ${renderKeypadsCard(d.stations, d.buttons)}
   `;
 }
 
-// ── Zones/Loads card ──
-const CONTROL_TYPE = {
-  1: {label:'Dimmer', cls:'badge-dim'},
-  7: {label:'CCO Maintained', cls:'badge-cco'},
-  8: {label:'CCO Pulsed', cls:'badge-cco'},
-  12:{label:'Shade', cls:'badge-shade'},
-  26:{label:'HVAC', cls:'badge-hvac'},
-};
-const ZONE_LAYER = {0:'Ambient', 1:'Task', 2:'Accent'};
+// ── Zones card ───────────────────────────────
+const CT = {1:{l:'Dimmer',c:'badge-dim'},7:{l:'CCO Maintained',c:'badge-cco'},8:{l:'CCO Pulsed',c:'badge-cco'},12:{l:'Shade',c:'badge-shade'},26:{l:'HVAC',c:'badge-hvac'}};
+const LAYERS = [{v:0,l:'Ambient',c:'layer-ambient'},{v:1,l:'Task',c:'layer-task'},{v:2,l:'Accent',c:'layer-accent'}];
 
-function renderZonesCard(zones) {
+function layerBadge(val) {
+  const l = LAYERS.find(x => x.v === val);
+  return l ? `<span class="layer-badge ${l.c}">${l.l}</span>` : '';
+}
+
+function renderZonesCard(zones, areaId) {
   if (!zones.length) return '';
   const rows = zones.map(z => {
-    const ct = CONTROL_TYPE[z.ControlType] || {label:`Type ${z.ControlType}`, cls:'badge-other'};
-    const layer = ZONE_LAYER[z.ZoneLayer];
-    const layerBadge = layer ? `<span class="layer-badge layer-${layer.toLowerCase()}">${layer}</span>` : '';
+    const ct = CT[z.ControlType] || {l:`Type ${z.ControlType}`,c:'badge-other'};
+    const layerSel = `<select class="layer-select" onchange="patchZone(${z.ZoneID}, 'ZoneLayer', this.value, ${areaId})">
+      ${LAYERS.map(l => `<option value="${l.v}" ${l.v===z.ZoneLayer?'selected':''}>${l.l}</option>`).join('')}
+      <option value="4" ${z.ZoneLayer===4?'selected':''}>Internal</option>
+    </select>`;
     return `<tr>
-      <td style="color:var(--text-dim);text-align:center">${z.LoadNumber}</td>
-      <td style="font-weight:500">${z.Name}</td>
-      <td>${layerBadge}</td>
-      <td><span class="badge ${ct.cls}">${ct.label}</span></td>
-      <td style="color:var(--text-dim);font-size:11px">${z.ZoneDescription || ''}</td>
+      <td style="color:var(--text-dim);text-align:center;width:50px">${z.LoadNumber}</td>
+      <td class="editable" contenteditable="true"
+          data-zone="${z.ZoneID}" data-field="Name" data-area="${areaId}"
+          onblur="onEditBlur(this)"
+          style="font-weight:500">${z.Name}<span class="edit-hint">✎</span></td>
+      <td>${layerSel}</td>
+      <td><span class="badge ${ct.c}">${ct.l}</span></td>
+      <td class="editable" contenteditable="true"
+          data-zone="${z.ZoneID}" data-field="ZoneDescription" data-area="${areaId}"
+          onblur="onEditBlur(this)"
+          style="color:var(--text-dim)">${z.ZoneDescription||''}<span class="edit-hint">✎</span></td>
     </tr>`;
   }).join('');
-
   return `<div class="card">
-    <div class="card-header">Loads / Zones <span class="count">${zones.length}</span></div>
-    <table>
-      <tr><th style="width:50px">Load#</th><th>Zone Name</th><th>Layer</th><th>Type</th><th>Description</th></tr>
-      ${rows}
-    </table>
+    <div class="card-header">Loads / Zones <span class="count">${zones.length}</span>
+      <span style="margin-left:auto;font-size:10px;color:var(--text-dim);font-weight:400;text-transform:none">名前・説明はクリックして編集</span>
+    </div>
+    <table><tr><th>Load#</th><th>Zone Name</th><th>Layer</th><th>Type</th><th>Description</th></tr>${rows}</table>
   </div>`;
 }
 
-// ── Scenes card ──
+async function onEditBlur(cell) {
+  const zoneId = parseInt(cell.dataset.zone);
+  const field = cell.dataset.field;
+  const areaId = parseInt(cell.dataset.area);
+  // Remove the hint span from value
+  const spans = cell.querySelectorAll('.edit-hint');
+  let val = cell.textContent;
+  spans.forEach(s => { val = val.replace(s.textContent, ''); });
+  val = val.trim();
+  await patchZone(zoneId, field, val, areaId, false);
+}
+
+async function patchZone(zoneId, field, value, areaId, reload=true) {
+  const body = {};
+  body[field] = field === 'ZoneLayer' ? parseInt(value) : value;
+  const res = await fetch(`/api/zone/${zoneId}`, {
+    method: 'PATCH',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body)
+  });
+  if (!res.ok) { toast('保存失敗', 'red'); return; }
+  isDirty = true;
+  document.getElementById('save-btn').disabled = !isPl;
+  // Refresh dirty badge
+  const db = document.getElementById('dirty-badge');
+  if (db) db.style.display = 'inline-block';
+  else {
+    const bar = document.getElementById('place-bar');
+    const span = document.createElement('span');
+    span.id = 'dirty-badge';
+    span.style.cssText = 'display:inline-block;background:var(--orange);color:#000;font-size:10px;font-weight:700;padding:1px 7px;border-radius:10px;';
+    span.textContent = '● 未保存';
+    bar.appendChild(span);
+  }
+  toast('更新しました');
+  if (reload) await loadDetail(areaId, '');
+}
+
+// ── Scenes card ──────────────────────────────
 function renderScenesCard(scenes) {
   if (!scenes.length) return '';
-  const chips = scenes.map(s => {
-    const cls = s.Number === 0 ? 'scene-off' : 'scene-on';
-    return `<div class="scene-chip">
-      <span class="scene-num ${cls}">${s.Number === 0 ? 'Off' : s.Number}</span>
-      <span>${s.Name}</span>
-    </div>`;
-  }).join('');
-  return `<div class="card">
-    <div class="card-header">Scenes <span class="count">${scenes.length}</span></div>
-    <div class="scene-grid">${chips}</div>
-  </div>`;
+  const chips = scenes.map(s => `<div class="scene-chip">
+    <span class="scene-num ${s.Number===0?'scene-off':'scene-on'}">${s.Number===0?'Off':s.Number}</span>
+    <span>${s.Name}</span></div>`).join('');
+  return `<div class="card"><div class="card-header">Scenes <span class="count">${scenes.length}</span></div><div class="scene-grid">${chips}</div></div>`;
 }
 
-// ── Keypads card ──
-const PROG_SHORT = {
-  'SAPM': 'Scene',
-  'ATPM': 'Toggle',
-  'SSRLPM': 'Raise/Lower',
-  'MRLPM': 'Master R/L',
-  'AdvanceConditionalProgrammingModel': 'Conditional',
-};
-
+// ── Keypads card ─────────────────────────────
+const PROG = {'SAPM':'Scene','ATPM':'Toggle','SSRLPM':'Raise/Lower','MRLPM':'Master R/L','AdvanceConditionalProgrammingModel':'Conditional'};
 function renderKeypadsCard(stations, buttons) {
   if (!stations.length) return '';
-
-  // Group by ControlStationID
-  const stationMap = {};
-  stations.forEach(s => {
-    if (!stationMap[s.ControlStationID]) {
-      stationMap[s.ControlStationID] = { name: s.Name, deviceId: s.ControlStationDeviceID, modelId: s.ModelInfoID };
-    }
-  });
-
-  const btnsById = {};
-  buttons.forEach(b => {
-    if (!btnsById[b.ParentDeviceID]) btnsById[b.ParentDeviceID] = [];
-    btnsById[b.ParentDeviceID].push(b);
-  });
-
-  const cards = Object.entries(stationMap).map(([csId, cs]) => {
-    const btns = (btnsById[cs.deviceId] || []).map(b => {
-      const prog = PROG_SHORT[b.ProgModel] || b.ProgModel || '─';
-      return `<div class="btn-row">
-        <div class="btn-num">${b.ButtonNumber + 1}</div>
-        <span>${b.ButtonName}</span>
-        <span class="btn-prog">${prog}</span>
-      </div>`;
-    }).join('');
-
-    return `<div class="keypad-card">
-      <div class="keypad-name">⌨ ${cs.name} <span style="color:var(--text-dim);font-size:10px;margin-left:auto">Model:${cs.modelId || '─'}</span></div>
-      <div class="keypad-body">${btns || '<div style="padding:8px 12px;color:var(--text-dim);font-size:11px">ボタンなし</div>'}</div>
-    </div>`;
+  const stMap = {};
+  stations.forEach(s => { if (!stMap[s.ControlStationID]) stMap[s.ControlStationID]={name:s.Name,devId:s.ControlStationDeviceID,modelId:s.ModelInfoID}; });
+  const btns = {};
+  buttons.forEach(b => { if (!btns[b.ParentDeviceID]) btns[b.ParentDeviceID]=[]; btns[b.ParentDeviceID].push(b); });
+  const cards = Object.entries(stMap).map(([id,cs]) => {
+    const bl = (btns[cs.devId]||[]).map(b => `<div class="btn-row">
+      <div class="btn-num">${b.ButtonNumber+1}</div><span>${b.ButtonName}</span>
+      <span class="btn-prog">${PROG[b.ProgModel]||b.ProgModel||'─'}</span></div>`).join('');
+    return `<div class="keypad-card"><div class="keypad-name">⌨ ${cs.name}<span style="color:var(--text-dim);font-size:10px;margin-left:auto">Model:${cs.modelId||'─'}</span></div><div class="keypad-body">${bl||'<div style="padding:6px 10px;color:var(--text-dim);font-size:11px">ボタンなし</div>'}</div></div>`;
   }).join('');
+  return `<div class="card"><div class="card-header">Control Stations <span class="count">${Object.keys(stMap).length}</span></div><div class="keypad-grid">${cards}</div></div>`;
+}
 
-  return `<div class="card">
-    <div class="card-header">Control Stations / Keypads <span class="count">${Object.keys(stationMap).length}</span></div>
-    <div class="keypad-grid">${cards}</div>
-  </div>`;
+// ── Save ─────────────────────────────────────
+async function saveFile() {
+  const btn = document.getElementById('save-btn');
+  btn.disabled = true;
+  btn.textContent = '保存中...';
+  const res = await fetch('/api/save', {method:'POST'});
+  const d = await res.json();
+  btn.textContent = '💾 保存';
+  if (!res.ok) { toast(d.error||'保存失敗', 'red'); btn.disabled = false; return; }
+  isDirty = false;
+  const db = document.getElementById('dirty-badge');
+  if (db) db.remove();
+  toast('保存しました ✓');
+}
+
+// ── Toast ────────────────────────────────────
+function toast(msg, type='') {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.style.background = type==='red' ? '#c0392b' : '#2d6bb3';
+  el.classList.add('show');
+  setTimeout(() => el.classList.remove('show'), 2500);
 }
 </script>
 </body>
