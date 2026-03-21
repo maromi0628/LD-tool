@@ -100,6 +100,12 @@
 
   /* Layer select dropdown */
   select.layer-select { background: var(--surface2); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 2px 4px; font-size: 11px; cursor: pointer; }
+
+  /* Template switcher */
+  #template-bar { background: var(--surface2); border-bottom: 1px solid var(--border); padding: 4px 14px; display: none; align-items: center; gap: 8px; font-size: 11px; color: var(--text-dim); }
+  #template-bar label { white-space: nowrap; }
+  #template-select { background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 3px 6px; font-size: 11px; cursor: pointer; flex: 1; max-width: 320px; }
+  #template-loading { color: var(--text-dim); font-size: 11px; display: none; }
 </style>
 </head>
 <body>
@@ -117,6 +123,12 @@
 
 <div id="place-bar">
   <span style="color:var(--text-dim)">ファイルまたはフォルダを選択してください</span>
+</div>
+
+<div id="template-bar">
+  <label for="template-select">テンプレート:</label>
+  <select id="template-select" onchange="switchTemplate(this.value)"></select>
+  <span id="template-loading">切替中...</span>
 </div>
 
 <div class="main">
@@ -138,6 +150,8 @@
 let isPl = false;
 let isDirty = false;
 let currentAreaId = null;
+let allTemplates = [];   // [{id, name}] from SQLite
+let fsTemplates = [];    // [filename] from filesystem
 
 // ── Open file/folder ─────────────────────────
 async function openFile(mode) {
@@ -150,10 +164,51 @@ async function openFile(mode) {
   const data = await res.json();
   isPl = data.is_pl;
   document.getElementById('save-btn').disabled = !isPl;
+  fsTemplates = data.templates || [];
   await loadOverview();
+  updateTemplateBar(data.active_template);
   await loadTree();
   if (currentAreaId) loadDetail(currentAreaId, '');
   toast(`${data.name} を開きました`);
+}
+
+// ── Template switcher ─────────────────────────
+function updateTemplateBar(activeId) {
+  const bar = document.getElementById('template-bar');
+  const sel = document.getElementById('template-select');
+  if (fsTemplates.length <= 1) { bar.style.display = 'none'; return; }
+  bar.style.display = 'flex';
+  sel.innerHTML = fsTemplates.map(tid => {
+    const tidLower = tid.toLowerCase();
+    const meta = allTemplates.find(t =>
+      (t.projectDatabaseArtifactId || '').toLowerCase() === tidLower
+    );
+    const label = meta ? meta.name : tid.slice(0, 16) + '…';
+    return `<option value="${tid}" ${tid === activeId ? 'selected' : ''}>${label}</option>`;
+  }).join('');
+}
+
+async function switchTemplate(templateId) {
+  const loading = document.getElementById('template-loading');
+  const sel = document.getElementById('template-select');
+  loading.style.display = 'inline';
+  sel.disabled = true;
+  currentAreaId = null;
+  document.getElementById('detail').innerHTML = '<div class="loading">テンプレート切替中...</div>';
+  try {
+    const res = await fetch('/api/switch-template', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({template_id: templateId})
+    });
+    const d = await res.json();
+    if (!res.ok) { toast(d.error || '切替失敗', 'red'); return; }
+    await loadTree();
+    toast('テンプレートを切り替えました');
+  } finally {
+    loading.style.display = 'none';
+    sel.disabled = false;
+  }
 }
 
 // ── Overview bar ─────────────────────────────
@@ -163,6 +218,8 @@ async function loadOverview() {
   const d = await res.json();
   const p = d.place, a = d.address;
   isDirty = d.dirty;
+  allTemplates = d.templates || [];
+  if (d.fs_templates) { fsTemplates = d.fs_templates; updateTemplateBar(d.active_template); }
   const bar = document.getElementById('place-bar');
   bar.innerHTML = `
     <div class="info-item"><span class="info-label" style="color:var(--text-dim)">Place:</span><span class="info-value">${p.name||'─'}</span></div>
