@@ -77,18 +77,38 @@ def execute_sql(sql, params=()):
     state["dirty"] = True
 
 
-def execute_sql_insert(sql, params=()):
-    """Execute INSERT with OUTPUT INSERTED clause; return list of inserted rows."""
+def _alloc_id(cur):
+    """Allocate a unique object ID from tblNextObjectID (Lutron's ID sequencer).
+    Returns the allocated ID (int). Must be called inside a transaction."""
+    cur.execute("SELECT NextObjectID FROM tblNextObjectID WITH (UPDLOCK)")
+    row = cur.fetchone()
+    new_id = (row[0] if row else 9000) + 1
+    if row:
+        cur.execute("UPDATE tblNextObjectID SET NextObjectID = ?", (new_id,))
+    else:
+        cur.execute("INSERT INTO tblNextObjectID (NextObjectID) VALUES (?)", (new_id,))
+    return new_id
+
+
+def _alloc_and_insert(table, pk_col, row):
+    """Allocate a new ID from tblNextObjectID, INSERT row dict into table.
+    pk_col: name of the primary key column (will be set to the allocated ID).
+    row: dict of {column: value} pairs (must NOT include pk_col).
+    Returns the new integer ID."""
     conn = sql_conn()
     conn.autocommit = False
     cur = conn.cursor()
     cur.execute(f"USE [{state['db_name']}]")
-    cur.execute(sql, params)
-    rows = [dict(zip([col[0] for col in cur.description], row)) for row in cur.fetchall()]
+    new_id = _alloc_id(cur)
+    cols = [pk_col] + list(row.keys())
+    vals = [new_id] + list(row.values())
+    col_str = ", ".join(cols)
+    ph_str = ", ".join("?" * len(vals))
+    cur.execute(f"INSERT INTO {table} ({col_str}) VALUES ({ph_str})", vals)
     conn.commit()
     conn.close()
     state["dirty"] = True
-    return rows
+    return new_id
 
 
 def execute_sqls(statements):
@@ -1441,52 +1461,47 @@ def add_action_to_trigger(trigger_id):
     try:
         if action_type == "run":
             preset_id = data.get("preset_id") or 0
-            rows = execute_sql_insert("""
-                INSERT INTO tblAction
-                    (ObjectType, DatabaseRevision, ParentID, ParentType, SortOrder,
-                     DelayTime, ExecutionType, PresetId, WhereUsedId)
-                OUTPUT INSERTED.ActionID
-                VALUES (234, 0, ?, 232, ?, 0, 1, ?, 2147483647)
-            """, (trigger_id, sort, preset_id))
-            return jsonify({"ok": True, "action_id": rows[0]["ActionID"]})
+            action_id = _alloc_and_insert("tblAction", "ActionID", {
+                "ObjectType": 234, "DatabaseRevision": 0,
+                "ParentID": trigger_id, "ParentType": 232, "SortOrder": sort,
+                "DelayTime": 0, "ExecutionType": 1, "PresetId": preset_id,
+                "WhereUsedId": 2147483647,
+            })
+            return jsonify({"ok": True, "action_id": action_id})
 
         elif action_type == "delay":
             delay_ms = max(1000, min(int(data.get("delay_ms", 1000)), 14400000))
-            rows = execute_sql_insert("""
-                INSERT INTO tblAction
-                    (ObjectType, DatabaseRevision, ParentID, ParentType, SortOrder,
-                     DelayTime, ExecutionType, PresetId, WhereUsedId)
-                OUTPUT INSERTED.ActionID
-                VALUES (235, 0, ?, 232, ?, ?, 0, 0, 2147483647)
-            """, (trigger_id, sort, delay_ms))
-            return jsonify({"ok": True, "action_id": rows[0]["ActionID"]})
+            action_id = _alloc_and_insert("tblAction", "ActionID", {
+                "ObjectType": 235, "DatabaseRevision": 0,
+                "ParentID": trigger_id, "ParentType": 232, "SortOrder": sort,
+                "DelayTime": delay_ms, "ExecutionType": 0, "PresetId": 0,
+                "WhereUsedId": 2147483647,
+            })
+            return jsonify({"ok": True, "action_id": action_id})
 
         elif action_type == "if":
             # Conditional action
-            rows = execute_sql_insert("""
-                INSERT INTO tblAction
-                    (ObjectType, DatabaseRevision, ParentID, ParentType, SortOrder,
-                     DelayTime, ExecutionType, PresetId, WhereUsedId)
-                OUTPUT INSERTED.ActionID
-                VALUES (233, 0, ?, 232, ?, 0, 0, 0, 2147483647)
-            """, (trigger_id, sort))
-            action_id = rows[0]["ActionID"]
+            action_id = _alloc_and_insert("tblAction", "ActionID", {
+                "ObjectType": 233, "DatabaseRevision": 0,
+                "ParentID": trigger_id, "ParentType": 232, "SortOrder": sort,
+                "DelayTime": 0, "ExecutionType": 0, "PresetId": 0,
+                "WhereUsedId": 2147483647,
+            })
             # Default evaluation: System Property DND Mode = 1
-            eval_rows = execute_sql_insert("""
-                INSERT INTO tblEvaluation
-                    (ObjectType, DatabaseRevision, ParentID, ParentType, SortOrder,
-                     EvaluationOperator, FirstOperandObjectID, FirstOperandObjectType,
-                     FirstOperandRefProperty, SecondOperand, ConditionType, ThirdOperand, WhereUsedId)
-                OUTPUT INSERTED.EvaluationID
-                VALUES (237, 0, ?, 233, 0, 3, 34, 400, 151, 1, 23, 0, 2147483647)
-            """, (action_id,))
-            eval_id = eval_rows[0]["EvaluationID"] if eval_rows else None
+            eval_id = _alloc_and_insert("tblEvaluation", "EvaluationID", {
+                "ObjectType": 237, "DatabaseRevision": 0,
+                "ParentID": action_id, "ParentType": 233, "SortOrder": 0,
+                "EvaluationOperator": 3, "FirstOperandObjectID": 34,
+                "FirstOperandObjectType": 400, "FirstOperandRefProperty": 151,
+                "SecondOperand": 1, "ConditionType": 23, "ThirdOperand": 0,
+                "WhereUsedId": 2147483647,
+            })
             # Then branch trigger
-            execute_sql("""
-                INSERT INTO tblTrigger
-                    (ObjectType, ParentId, ParentType, DatabaseRevision, SortOrder, TriggerType, WhereUsedId)
-                VALUES (232, ?, 233, 0, 0, 5, 2147483647)
-            """, (action_id,))
+            _alloc_and_insert("tblTrigger", "TriggerID", {
+                "ObjectType": 232, "ParentId": action_id, "ParentType": 233,
+                "DatabaseRevision": 0, "SortOrder": 0, "TriggerType": 5,
+                "WhereUsedId": 2147483647,
+            })
             return jsonify({"ok": True, "action_id": action_id, "eval_id": eval_id})
 
         else:
@@ -1502,11 +1517,11 @@ def add_else_branch(action_id):
     if not state["db_name"]:
         return jsonify({"error": "DB未接続"}), 400
     try:
-        execute_sql("""
-            INSERT INTO tblTrigger
-                (ObjectType, ParentId, ParentType, DatabaseRevision, SortOrder, TriggerType, WhereUsedId)
-            VALUES (232, ?, 233, 0, 1, 6, 2147483647)
-        """, (action_id,))
+        _alloc_and_insert("tblTrigger", "TriggerID", {
+            "ObjectType": 232, "ParentId": action_id, "ParentType": 233,
+            "DatabaseRevision": 0, "SortOrder": 1, "TriggerType": 6,
+            "WhereUsedId": 2147483647,
+        })
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -1535,13 +1550,12 @@ def add_root_trigger(pm_id):
         rows = _try_q(
             "SELECT COALESCE(MAX(SortOrder)+1,0) AS nxt FROM tblTrigger WHERE ParentId = ?", (pm_id,))
         sort = rows[0]["nxt"] if rows and not rows[0].get("__error__") else 0
-        result = execute_sql_insert("""
-            INSERT INTO tblTrigger
-                (ObjectType, ParentId, ParentType, DatabaseRevision, SortOrder, TriggerType, WhereUsedId)
-            OUTPUT INSERTED.TriggerID
-            VALUES (232, ?, 231, 0, ?, ?, 2147483647)
-        """, (pm_id, sort, trigger_type))
-        return jsonify({"ok": True, "trigger_id": result[0]["TriggerID"]})
+        trigger_id = _alloc_and_insert("tblTrigger", "TriggerID", {
+            "ObjectType": 232, "ParentId": pm_id, "ParentType": 231,
+            "DatabaseRevision": 0, "SortOrder": sort, "TriggerType": trigger_type,
+            "WhereUsedId": 2147483647,
+        })
+        return jsonify({"ok": True, "trigger_id": trigger_id})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
