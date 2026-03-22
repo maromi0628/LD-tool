@@ -591,7 +591,7 @@ const PROG_LABELS = {
   'MRLPM': 'Master R/L', 'AdvanceConditionalProgrammingModel': 'Conditional',
   'DAPM': 'Dimmer Action', 'CAPM': 'CCO Action',
 };
-const LED_LOGIC = {0:'None', 1:'Active', 2:'Scene', 3:'Occupied', 4:'TimeOfDay', 5:'Status', 6:'Variable'};
+const LED_LOGIC = {0:'None', 1:'Room', 2:'Scene', 3:'Pathway', 4:'Momentary On When Pressed', 5:'Via Integration', 6:'Defined by sequence'};
 const TRIGGER_TYPE = {1:'Press', 2:'Release', 3:'Double Tap', 4:'Hold', 5:'If (LED On)', 6:'Else'};
 const ACTION_OTYPE = {234:'Run', 235:'Delay', 233:'Conditional'};
 
@@ -717,9 +717,14 @@ function renderButtonProgramDetail(b, pm, presetNames, trigTrees) {
   const ledRefLabel = pm.ReferencePresetIDForLed ? presetLabel(pm.ReferencePresetIDForLed, presetNames) : '─';
   const ledLogicOpts = Object.entries(LED_LOGIC)
     .map(([v, l]) => `<option value="${v}" ${pm.LedLogic == v ? 'selected' : ''}>${l}</option>`).join('');
+  const reverseChecked = pm.UseReverseLedLogic ? 'checked' : '';
   html += `<div style="display:flex;flex-wrap:wrap;gap:12px;margin-bottom:8px;font-size:11px;padding:4px 0;border-bottom:1px solid rgba(255,255,255,0.06);align-items:center">
     <span><span style="color:var(--text-dim)">LED Logic: </span><select class="prog-led-logic-sel"
       onchange="editLedLogic(${pmId}, this.value)">${ledLogicOpts}</select></span>
+    <label style="display:flex;align-items:center;gap:4px;cursor:pointer;color:var(--text-dim)">
+      <input type="checkbox" ${reverseChecked} onchange="editPmBool(${pmId}, 'UseReverseLedLogic', this.checked)">
+      Reverse Logic
+    </label>
     <span class="prog-led-edit" onclick="editLedRef(${pmId}, ${pm.ReferencePresetIDForLed ?? 'null'})">
       <span style="color:var(--text-dim)">LED Based on: </span><span style="color:var(--teal)">${ledRefLabel}</span><span class="prog-edit-hint">✎</span>
     </span>
@@ -799,32 +804,62 @@ function switchEventTab(uid, tabKey) {
 }
 
 // ── Condition text builder ────────────────────
-// tblAction (ObjectType=233) and tblTrigger have NO condition-specific columns.
-// Condition type is encoded in the TriggerType of the sub-trigger:
-//   TriggerType=5 → "If LED is On" (current button's LED)
-//   TriggerType=6 → "Else"
-// The LED reference comes from PM.ReferencePresetIDForLed.
-// WhereUsedId=2147483647 is a sentinel (Int32.Max) — ignore it.
+// Condition data comes from tblEvaluation rows attached as act.evaluations.
+// ConditionType: 0=Variable, 5=LED, 23=SystemProperty, 1=Time
+// EvaluationOperator: 3=Equal, 4=NotEqual
+
+const SYSTEM_PROP_NAMES = {
+  149: 'Occupancy Mode',
+  150: 'Emergency Mode',
+  151: 'DND Mode',
+  152: 'System Mode 152',
+  156: 'ADA Mode',
+};
+
+function evalOpText(op) { return op === 4 ? 'is not' : 'is'; }
+
+// Lutron time encoding: (TimeOfDay << 16) | offsetMinutes
+// TimeOfDay: 0-1439 = minutes from midnight, 2000=Sunrise, 2001=Sunset
+function decodeLutronTime(val) {
+  if (val == null) return '?';
+  const tod = (val >> 16) & 0xFFFF;
+  const offset = val & 0xFFFF;
+  const offStr = offset > 0 ? `+${offset}min` : offset < 0 ? `${offset}min` : '';
+  if (tod === 2000) return `Sunrise${offStr}`;
+  if (tod === 2001) return `Sunset${offStr}`;
+  const h = Math.floor(tod / 60).toString().padStart(2, '0');
+  const m = (tod % 60).toString().padStart(2, '0');
+  return `${h}:${m}${offStr}`;
+}
+
+function encodeLutronTime(todCode, offsetMin) {
+  return ((todCode & 0xFFFF) << 16) | (offsetMin & 0xFFFF);
+}
 
 function buildConditionText(act, presetNames, pm) {
-  if (act.Notes && act.Notes.trim()) return act.Notes;
-
-  const subTrigs = act.sub_triggers || [];
-  const thenTrig = subTrigs.find(st => st.TriggerType === 5);
-
-  if (thenTrig) {
-    // TriggerType=5 = "If LED is On" — resolve which LED from PM
-    if (pm && pm.ReferencePresetIDForLed && presetNames) {
-      const ref = presetLabel(pm.ReferencePresetIDForLed, presetNames);
-      return `${ref} LED is On`;
+  const evals = act.evaluations;
+  if (evals && evals.length) {
+    const cond = evals.find(e => e.ObjectType !== 236) || evals[0];
+    if (cond) {
+      const op = evalOpText(cond.EvaluationOperator);
+      if (cond.ConditionType === 0 && cond.ObjectType !== 236) {
+        const varName = cond._var_name || `Var:${cond.FirstOperandObjectID}`;
+        const stateName = cond._state_name || `State:${cond.SecondOperand}`;
+        return `${varName} ${op} ${stateName}`;
+      } else if (cond.ConditionType === 5) {
+        const station = cond._led_station_name || '';
+        const ledNum = cond._led_number != null ? `LED ${cond._led_number}` : `LED:${cond.FirstOperandObjectID}`;
+        const label = station ? `${station} ${ledNum}` : ledNum;
+        return `${label} ${op} ${cond.SecondOperand === 1 ? 'On' : 'Off'}`;
+      } else if (cond.ConditionType === 23) {
+        const propName = SYSTEM_PROP_NAMES[cond.FirstOperandRefProperty] || `Prop:${cond.FirstOperandRefProperty}`;
+        return `${propName} ${op} ${cond.SecondOperand}`;
+      } else if (cond.ConditionType === 1) {
+        return `Time of Day is from ${decodeLutronTime(cond.SecondOperand)} to ${decodeLutronTime(cond.ThirdOperand)}`;
+      }
     }
-    return 'LED is On';
   }
-
-  // Unknown condition type (TriggerType not yet mapped)
-  const unknownTrig = subTrigs.find(st => st.TriggerType !== 5 && st.TriggerType !== 6);
-  if (unknownTrig) return `(TriggerType:${unknownTrig.TriggerType})`;
-
+  if (act.Notes && act.Notes.trim()) return act.Notes;
   return null;
 }
 
@@ -843,10 +878,12 @@ function renderActionList(actions, presetNames, depth, pm) {
       const thenBranch = subTrigs.filter(st => st.TriggerType === 5);
       const elseBranch = subTrigs.filter(st => st.TriggerType === 6);
       const condText = buildConditionText(act, presetNames, pm);
+      const evals = act.evaluations || [];
+      const editableCond = evals.find(e => e.ObjectType !== 236);
       const condDisplay = condText
-        ? `<span class="prog-condition">${condText}</span>`
-        : `<span style="color:var(--text-dim);font-style:italic">(condition)</span>`;
-      html += `<div class="prog-line" style="padding-left:${pad}px"><span class="prog-keyword">If</span> ${condDisplay} <span class="prog-keyword">Then</span> <button onclick="inspectCondition(${act.ActionID})" style="font-size:9px;padding:0 4px;background:rgba(255,255,255,0.1);border:none;color:var(--text-dim);cursor:pointer;border-radius:3px" title="条件の生データを確認">🔍</button></div>`;
+        ? `<span class="prog-condition prog-line-run" onclick="editCondition(${JSON.stringify(editableCond || null).replace(/"/g, '&quot;')})">${condText}<span class="prog-edit-hint">✎</span></span>`
+        : `<span class="prog-condition prog-line-run" onclick="editCondition(${JSON.stringify(editableCond || null).replace(/"/g, '&quot;')})" style="font-style:italic">(condition)<span class="prog-edit-hint">✎</span></span>`;
+      html += `<div class="prog-line" style="padding-left:${pad}px"><span class="prog-keyword">If</span> ${condDisplay} <span class="prog-keyword">Then</span></div>`;
       thenBranch.forEach(st => { html += renderActionList(st.actions, presetNames, depth + 1, pm); });
       if (elseBranch.length) {
         html += `<div class="prog-line" style="padding-left:${pad}px"><span class="prog-keyword">Else</span></div>`;
@@ -1108,6 +1145,258 @@ async function editLedLogic(pmId, value) {
   const d = await res.json();
   if (d.error) showToast('エラー: ' + d.error);
   else { markDirty(); showToast('LED Logic 更新しました'); }
+}
+
+async function editPmBool(pmId, field, checked) {
+  const res = await fetch(`/api/pm/${pmId}`, {
+    method: 'PUT', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({[field]: checked ? 1 : 0}),
+  });
+  const d = await res.json();
+  if (d.error) showToast('エラー: ' + d.error);
+  else { markDirty(); showToast(`${field} 更新しました`); }
+}
+
+// ── Condition editing ──────────────────────────
+let _variablesCache = null;
+let _ledsCache = null;
+
+async function loadVariables() {
+  if (!_variablesCache) {
+    const r = await fetch('/api/variables');
+    _variablesCache = (await r.json()).variables || [];
+  }
+  return _variablesCache;
+}
+
+async function loadLeds() {
+  if (!_ledsCache) {
+    const r = await fetch('/api/leds');
+    _ledsCache = (await r.json()).leds || [];
+  }
+  return _ledsCache;
+}
+
+async function editCondition(condJson) {
+  let cond;
+  try { cond = typeof condJson === 'string' ? JSON.parse(condJson) : condJson; } catch { cond = null; }
+  if (!cond || !cond.EvaluationID) { showToast('この条件は編集できません'); return; }
+
+  const ct = cond.ConditionType;
+
+  if (ct === 0) {
+    // Variable state
+    const vars = await loadVariables();
+    _showConditionModal('Variable 条件を変更', buildVariablePicker(vars, cond), async (data) => {
+      await _saveCondition(cond.EvaluationID, data);
+    });
+  } else if (ct === 5) {
+    // LED state
+    const leds = await loadLeds();
+    _showConditionModal('LED 条件を変更', buildLedPicker(leds, cond), async (data) => {
+      await _saveCondition(cond.EvaluationID, data);
+    });
+  } else if (ct === 23) {
+    // System property
+    _showConditionModal('System Property 条件を変更', buildSysPropPicker(cond), async (data) => {
+      await _saveCondition(cond.EvaluationID, data);
+    });
+  } else if (ct === 1) {
+    // Time of Day
+    _showConditionModal('Time of Day 条件を変更', buildTimePicker(cond), async (data) => {
+      await _saveCondition(cond.EvaluationID, data);
+    });
+  } else {
+    showToast(`ConditionType ${ct} の編集は未対応です`);
+  }
+}
+
+function buildVariablePicker(vars, cond) {
+  const opSel = `<select id="cond-op" style="margin-bottom:10px;width:100%;padding:4px;background:var(--surface2);color:var(--text);border:1px solid rgba(255,255,255,0.1);border-radius:4px">
+    <option value="3" ${cond.EvaluationOperator===3?'selected':''}>is (Equal)</option>
+    <option value="4" ${cond.EvaluationOperator===4?'selected':''}>is not (NotEqual)</option>
+  </select>`;
+  let varSel = `<select id="cond-var" style="margin-bottom:8px;width:100%;padding:4px;background:var(--surface2);color:var(--text);border:1px solid rgba(255,255,255,0.1);border-radius:4px" onchange="updateVarStates(this.value)">`;
+  vars.forEach(v => {
+    varSel += `<option value="${v.VariableID}" ${v.VariableID==cond.FirstOperandObjectID?'selected':''}>${v.Name}</option>`;
+  });
+  varSel += '</select>';
+
+  // State select — populated by current variable
+  const curVar = vars.find(v => v.VariableID == cond.FirstOperandObjectID) || vars[0];
+  let stateSel = `<select id="cond-state" style="width:100%;padding:4px;background:var(--surface2);color:var(--text);border:1px solid rgba(255,255,255,0.1);border-radius:4px">`;
+  (curVar ? curVar.states : []).forEach(s => {
+    stateSel += `<option value="${s.VariableStateID}" ${s.VariableStateID==cond.SecondOperand?'selected':''}>${s.Name}</option>`;
+  });
+  stateSel += '</select>';
+
+  // Store vars for dynamic update
+  window._condVarsData = vars;
+
+  return `<div>
+    <div style="margin-bottom:6px;font-size:11px;color:var(--text-dim)">演算子</div>${opSel}
+    <div style="margin-bottom:6px;font-size:11px;color:var(--text-dim)">Variable</div>${varSel}
+    <div style="margin-bottom:6px;font-size:11px;color:var(--text-dim)">State</div>${stateSel}
+  </div>`;
+}
+
+function updateVarStates(varId) {
+  const vars = window._condVarsData || [];
+  const v = vars.find(x => x.VariableID == varId);
+  const sel = document.getElementById('cond-state');
+  if (!sel || !v) return;
+  sel.innerHTML = v.states.map(s => `<option value="${s.VariableStateID}">${s.Name}</option>`).join('');
+}
+
+function buildLedPicker(leds, cond) {
+  const opSel = `<select id="cond-op" style="margin-bottom:10px;width:100%;padding:4px;background:var(--surface2);color:var(--text);border:1px solid rgba(255,255,255,0.1);border-radius:4px">
+    <option value="3" ${cond.EvaluationOperator===3?'selected':''}>is (Equal)</option>
+    <option value="4" ${cond.EvaluationOperator===4?'selected':''}>is not (NotEqual)</option>
+  </select>`;
+  let ledSel = `<select id="cond-led" style="margin-bottom:8px;width:100%;padding:4px;background:var(--surface2);color:var(--text);border:1px solid rgba(255,255,255,0.1);border-radius:4px">`;
+  leds.forEach(l => {
+    const label = `LED ${l.LedNumber} — ${l.StationName || l.DeviceName}`;
+    ledSel += `<option value="${l.LedID}" ${l.LedID==cond.FirstOperandObjectID?'selected':''}>${label}</option>`;
+  });
+  ledSel += '</select>';
+  const stateSel = `<select id="cond-led-state" style="width:100%;padding:4px;background:var(--surface2);color:var(--text);border:1px solid rgba(255,255,255,0.1);border-radius:4px">
+    <option value="1" ${cond.SecondOperand===1?'selected':''}>On (Active)</option>
+    <option value="0" ${cond.SecondOperand===0?'selected':''}>Off (Inactive)</option>
+  </select>`;
+  return `<div>
+    <div style="margin-bottom:6px;font-size:11px;color:var(--text-dim)">演算子</div>${opSel}
+    <div style="margin-bottom:6px;font-size:11px;color:var(--text-dim)">LED</div>${ledSel}
+    <div style="margin-bottom:6px;font-size:11px;color:var(--text-dim)">状態</div>${stateSel}
+  </div>`;
+}
+
+function buildSysPropPicker(cond) {
+  const props = Object.entries(SYSTEM_PROP_NAMES);
+  const opSel = `<select id="cond-op" style="margin-bottom:10px;width:100%;padding:4px;background:var(--surface2);color:var(--text);border:1px solid rgba(255,255,255,0.1);border-radius:4px">
+    <option value="3" ${cond.EvaluationOperator===3?'selected':''}>is (Equal)</option>
+    <option value="4" ${cond.EvaluationOperator===4?'selected':''}>is not (NotEqual)</option>
+  </select>`;
+  let propSel = `<select id="cond-prop" style="margin-bottom:8px;width:100%;padding:4px;background:var(--surface2);color:var(--text);border:1px solid rgba(255,255,255,0.1);border-radius:4px">`;
+  props.forEach(([id, name]) => {
+    propSel += `<option value="${id}" ${cond.FirstOperandRefProperty==id?'selected':''}>${name}</option>`;
+  });
+  propSel += '</select>';
+  const valSel = `<select id="cond-prop-val" style="width:100%;padding:4px;background:var(--surface2);color:var(--text);border:1px solid rgba(255,255,255,0.1);border-radius:4px">
+    <option value="0" ${cond.SecondOperand===0?'selected':''}>0 (Off/Inactive)</option>
+    <option value="1" ${cond.SecondOperand===1?'selected':''}>1 (On/Active)</option>
+    <option value="2" ${cond.SecondOperand===2?'selected':''}>2</option>
+  </select>`;
+  return `<div>
+    <div style="margin-bottom:6px;font-size:11px;color:var(--text-dim)">演算子</div>${opSel}
+    <div style="margin-bottom:6px;font-size:11px;color:var(--text-dim)">Property</div>${propSel}
+    <div style="margin-bottom:6px;font-size:11px;color:var(--text-dim)">値</div>${valSel}
+  </div>`;
+}
+
+function buildTimePicker(cond) {
+  // Decode current From/To values
+  const fromVal = cond.SecondOperand || 0;
+  const toVal   = cond.ThirdOperand  || 0;
+  const fromTod = (fromVal >> 16) & 0xFFFF;
+  const toTod   = (toVal   >> 16) & 0xFFFF;
+  const fromOff = fromVal & 0xFFFF;
+  const toOff   = toVal   & 0xFFFF;
+
+  function todOption(id, label, cur) {
+    return `<option value="${id}" ${cur==id?'selected':''}>${label}</option>`;
+  }
+  function timeOpts(cur) {
+    let opts = todOption(2000, 'Sunrise', cur) + todOption(2001, 'Sunset', cur);
+    // Add common times every 30 min
+    for (let m = 0; m < 1440; m += 30) {
+      const h = Math.floor(m/60).toString().padStart(2,'0');
+      const mm = (m%60).toString().padStart(2,'0');
+      opts += `<option value="${m}" ${cur===m&&cur<2000?'selected':''}>${h}:${mm}</option>`;
+    }
+    return opts;
+  }
+
+  const sel = `width:100%;padding:4px;background:var(--surface2);color:var(--text);border:1px solid rgba(255,255,255,0.1);border-radius:4px`;
+  return `<div>
+    <div style="margin-bottom:6px;font-size:11px;color:var(--text-dim)">From</div>
+    <select id="cond-time-from" style="margin-bottom:8px;${sel}">${timeOpts(fromTod)}</select>
+    <div style="margin-bottom:6px;font-size:11px;color:var(--text-dim)">From オフセット (分)</div>
+    <input id="cond-time-from-off" type="number" value="${fromOff}" min="0" max="120"
+      style="margin-bottom:10px;${sel}">
+    <div style="margin-bottom:6px;font-size:11px;color:var(--text-dim)">To</div>
+    <select id="cond-time-to" style="margin-bottom:8px;${sel}">${timeOpts(toTod)}</select>
+    <div style="margin-bottom:6px;font-size:11px;color:var(--text-dim)">To オフセット (分)</div>
+    <input id="cond-time-to-off" type="number" value="${toOff}" min="0" max="120" style="${sel}">
+  </div>`;
+}
+
+let _condSaveCallback = null;
+
+function _showConditionModal(title, bodyHtml, onSave) {
+  _condSaveCallback = onSave;
+  const overlay = document.createElement('div');
+  overlay.className = 'scene-picker-overlay';
+  overlay.id = 'cond-editor-overlay';
+  overlay.innerHTML = `
+    <div class="scene-picker-modal" onclick="event.stopPropagation()" style="max-width:380px">
+      <div class="scene-picker-header">
+        <span>${title}</span>
+        <button onclick="document.getElementById('cond-editor-overlay').remove()">✕</button>
+      </div>
+      <div style="padding:16px">${bodyHtml}</div>
+      <div class="scene-picker-footer">
+        <button class="btn btn-primary" style="font-size:11px;padding:4px 12px" onclick="saveConditionEdit()">保存</button>
+        <button class="btn" style="font-size:11px;padding:4px 10px;background:var(--surface2);color:var(--text-dim)" onclick="document.getElementById('cond-editor-overlay').remove()">キャンセル</button>
+      </div>
+    </div>`;
+  overlay.addEventListener('click', () => overlay.remove());
+  document.body.appendChild(overlay);
+}
+
+function saveConditionEdit() {
+  // Collect values based on which selects are present
+  const data = {};
+  const op = document.getElementById('cond-op');
+  if (op) data.EvaluationOperator = parseInt(op.value);
+
+  const varSel = document.getElementById('cond-var');
+  const stateSel = document.getElementById('cond-state');
+  if (varSel && stateSel) {
+    data.FirstOperandObjectID = parseInt(varSel.value);
+    data.SecondOperand = parseInt(stateSel.value);
+  }
+  const ledSel = document.getElementById('cond-led');
+  const ledState = document.getElementById('cond-led-state');
+  if (ledSel && ledState) {
+    data.FirstOperandObjectID = parseInt(ledSel.value);
+    data.SecondOperand = parseInt(ledState.value);
+  }
+  const propSel = document.getElementById('cond-prop');
+  const propVal = document.getElementById('cond-prop-val');
+  if (propSel && propVal) {
+    data.FirstOperandRefProperty = parseInt(propSel.value);
+    data.SecondOperand = parseInt(propVal.value);
+  }
+  const timFrom = document.getElementById('cond-time-from');
+  const timTo   = document.getElementById('cond-time-to');
+  if (timFrom && timTo) {
+    const fromOff = parseInt(document.getElementById('cond-time-from-off')?.value || '0');
+    const toOff   = parseInt(document.getElementById('cond-time-to-off')?.value  || '0');
+    data.SecondOperand = encodeLutronTime(parseInt(timFrom.value), fromOff);
+    data.ThirdOperand  = encodeLutronTime(parseInt(timTo.value),   toOff);
+  }
+  document.getElementById('cond-editor-overlay')?.remove();
+  if (_condSaveCallback) { _condSaveCallback(data); _condSaveCallback = null; }
+}
+
+async function _saveCondition(evalId, data) {
+  const res = await fetch(`/api/evaluation/${evalId}`, {
+    method: 'PUT', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(data),
+  });
+  const d = await res.json();
+  if (d.error) { showToast('エラー: ' + d.error); return; }
+  await reloadPrograms();
 }
 
 async function showProgSchema() {

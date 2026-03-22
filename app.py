@@ -1010,9 +1010,44 @@ def _build_trigger_tree(trigger_rows, preset_ids, depth=0):
                 cond_action_ids.append(r["ActionID"])
             actions_by_trig[k].append(act)
 
-    # For conditional actions, recursively get sub-triggers (SELECT * for condition details)
+    # For conditional actions: fetch evaluations + recursively get sub-triggers
     if cond_action_ids:
         ph2 = ",".join("?" * len(cond_action_ids))
+
+        # Fetch tblEvaluation rows for these conditional actions
+        eval_rows = _try_q(f"""
+            SELECT e.*,
+                   v.Name   AS _var_name,
+                   vs.Name  AS _state_name,
+                   l.LedNumber AS _led_number,
+                   cs.Name  AS _led_station_name
+            FROM tblEvaluation e
+            LEFT JOIN tblVariable            v   ON e.ConditionType = 0 AND e.FirstOperandObjectType = 169
+                                                 AND e.FirstOperandObjectID = v.VariableID
+            LEFT JOIN tblVariableState       vs  ON e.ConditionType = 0
+                                                 AND e.SecondOperand = vs.VariableStateID
+            LEFT JOIN tblLed                 l   ON e.ConditionType = 5 AND e.FirstOperandObjectType = 107
+                                                 AND e.FirstOperandObjectID = l.LedID
+            LEFT JOIN tblControlStationDevice csd ON e.ConditionType = 5 AND l.ParentDeviceID = csd.ControlStationDeviceID
+            LEFT JOIN tblControlStation       cs  ON csd.ParentControlStationID = cs.ControlStationID
+            WHERE e.ParentID IN ({ph2}) AND e.ParentType = 233
+            ORDER BY e.ParentID, e.SortOrder
+        """, cond_action_ids)
+
+        evals_by_action = {}
+        if eval_rows and not eval_rows[0].get("__error__"):
+            for r in eval_rows:
+                k = r["ParentID"]
+                if k not in evals_by_action:
+                    evals_by_action[k] = []
+                evals_by_action[k].append(dict(r))
+
+        # Attach evaluations to each conditional action
+        for acts in actions_by_trig.values():
+            for act in acts:
+                if act["ObjectType"] == 233:
+                    act["evaluations"] = evals_by_action.get(act["ActionID"], [])
+
         sub_trig_rows = _try_q(f"""
             SELECT * FROM tblTrigger
             WHERE ParentId IN ({ph2})
@@ -1025,15 +1060,14 @@ def _build_trigger_tree(trigger_rows, preset_ids, depth=0):
                 k = r["ParentId"]
                 if k not in by_cond:
                     by_cond[k] = []
-                trig_entry = dict(r)   # pass ALL columns through
+                trig_entry = dict(r)
                 trig_entry["actions"] = []
                 by_cond[k].append(trig_entry)
 
             # Recursively build sub-trees and attach
             for cond_id, sub_trigs in by_cond.items():
                 sub_tree = _build_trigger_tree(sub_trigs, preset_ids, depth + 1)
-                # Attach back to the conditional action
-                for trig_id, acts in actions_by_trig.items():
+                for acts in actions_by_trig.values():
                     for act in acts:
                         if act["ActionID"] == cond_id:
                             act["sub_triggers"] = sub_tree
@@ -1356,6 +1390,76 @@ def debug_area(area_id):
 
 # ── Program editing ───────────────────────────
 
+@app.route("/api/variables")
+def all_variables():
+    """Return all variables with their states for the condition editor."""
+    if not state["db_name"]:
+        return jsonify({"error": "DB未接続"}), 400
+    rows = _try_q("""
+        SELECT v.VariableID, v.Name AS VariableName,
+               vs.VariableStateID, vs.Name AS StateName, vs.SortOrder
+        FROM tblVariable v
+        JOIN tblVariableState vs ON vs.ParentID = v.VariableID
+        ORDER BY v.Name, vs.SortOrder
+    """)
+    variables = {}
+    for r in (rows or []):
+        if r.get("__error__"):
+            break
+        vid = r["VariableID"]
+        if vid not in variables:
+            variables[vid] = {"VariableID": vid, "Name": r["VariableName"], "states": []}
+        variables[vid]["states"].append({
+            "VariableStateID": r["VariableStateID"],
+            "Name": r["StateName"],
+        })
+    return jsonify({"variables": list(variables.values())})
+
+
+@app.route("/api/leds")
+def all_leds():
+    """Return all LEDs with station name for the condition editor."""
+    if not state["db_name"]:
+        return jsonify({"error": "DB未接続"}), 400
+    rows = _try_q("""
+        SELECT l.LedID, l.LedNumber, l.ParentDeviceID,
+               csd.Name AS DeviceName,
+               cs.Name  AS StationName
+        FROM tblLed l
+        JOIN tblControlStationDevice csd ON csd.ControlStationDeviceID = l.ParentDeviceID
+        JOIN tblControlStation       cs  ON cs.ControlStationID = csd.ParentControlStationID
+        ORDER BY cs.Name, l.LedNumber
+    """)
+    if not rows or rows[0].get("__error__"):
+        rows = _try_q("""
+            SELECT LedID, LedNumber, ParentDeviceID,
+                   CAST(ParentDeviceID AS nvarchar(20)) AS DeviceName,
+                   CAST(ParentDeviceID AS nvarchar(20)) AS StationName
+            FROM tblLed ORDER BY ParentDeviceID, LedNumber
+        """)
+    return jsonify({"leds": rows or []})
+
+
+@app.route("/api/evaluation/<int:eval_id>", methods=["PUT"])
+def update_evaluation(eval_id):
+    """Update a condition (tblEvaluation row)."""
+    if not state["db_name"]:
+        return jsonify({"error": "DB未接続"}), 400
+    data = request.json or {}
+    allowed = {"FirstOperandObjectID", "SecondOperand", "FirstOperandRefProperty",
+               "EvaluationOperator", "ThirdOperand"}
+    updates = {k: v for k, v in data.items() if k in allowed}
+    if not updates:
+        return jsonify({"error": "更新フィールドなし"}), 400
+    sets = ", ".join(f"{k} = ?" for k in updates)
+    vals = list(updates.values()) + [eval_id]
+    try:
+        execute_sql(f"UPDATE tblEvaluation SET {sets} WHERE EvaluationID = ?", vals)
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/scenes")
 def all_scenes():
     """Return callable presets for the scene picker.
@@ -1422,7 +1526,8 @@ def update_pm(pm_id):
     allowed = {
         "PressPresetID", "ReleasePresetID", "HoldPresetId", "DoubleTapPresetID",
         "PresetID", "OnPresetID", "OffPresetID",
-        "ReferencePresetIDForLed", "LedLogic", "AllowDoubleTap", "HoldTime",
+        "ReferencePresetIDForLed", "LedLogic", "UseReverseLedLogic",
+        "AllowDoubleTap", "HoldTime",
     }
     updates = {k: v for k, v in data.items() if k in allowed}
     if not updates:
