@@ -122,6 +122,34 @@
   .prog-actions .prog-indent { margin-left: 20px; }
   .prog-no-data { color: var(--text-dim); font-size: 11px; font-style: italic; }
 
+  /* Editable program lines */
+  .prog-line-run { cursor: pointer; border-radius: 3px; transition: background 0.1s; }
+  .prog-line-run:hover { background: rgba(74,144,217,0.12); }
+  .prog-line-run:hover .prog-edit-hint { opacity: 1; }
+  .prog-edit-hint { opacity: 0; color: var(--accent); font-size: 9px; margin-left: 4px; transition: opacity 0.15s; }
+  .prog-led-edit { cursor: pointer; border-radius: 3px; padding: 0 2px; }
+  .prog-led-edit:hover { background: rgba(74,144,217,0.12); }
+  .prog-led-edit:hover .prog-edit-hint { opacity: 1; }
+  .prog-led-logic-sel { background: transparent; border: none; color: var(--teal); font-size: 11px; cursor: pointer; padding: 0; font-family: inherit; }
+  .prog-led-logic-sel:focus { outline: 1px solid var(--accent); border-radius: 2px; }
+  .prog-led-logic-sel option { background: var(--surface2); color: var(--text); }
+
+  /* Scene picker modal */
+  .scene-picker-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.55); z-index: 1000; display: flex; align-items: center; justify-content: center; }
+  .scene-picker-modal { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; width: 420px; max-height: 560px; display: flex; flex-direction: column; box-shadow: 0 8px 32px rgba(0,0,0,0.5); }
+  .scene-picker-header { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; border-bottom: 1px solid var(--border); font-size: 13px; font-weight: 600; }
+  .scene-picker-header button { background: none; border: none; color: var(--text-dim); font-size: 16px; cursor: pointer; padding: 0 4px; }
+  .scene-picker-header button:hover { color: var(--text); }
+  .scene-picker-search { width: 100%; padding: 8px 12px; background: var(--surface2); border: none; border-bottom: 1px solid var(--border); color: var(--text); font-size: 12px; box-sizing: border-box; }
+  .scene-picker-search:focus { outline: none; background: var(--surface); }
+  .scene-picker-list { flex: 1; overflow-y: auto; min-height: 0; }
+  .scene-picker-group { padding: 6px 12px 3px; font-size: 10px; font-weight: 700; color: var(--accent); text-transform: uppercase; letter-spacing: 0.8px; background: var(--surface2); border-bottom: 1px solid rgba(255,255,255,0.04); position: sticky; top: 0; }
+  .scene-picker-item { padding: 5px 16px; font-size: 12px; cursor: pointer; color: var(--text); }
+  .scene-picker-item:hover { background: rgba(74,144,217,0.15); }
+  .scene-picker-item.is-current { color: var(--accent); font-weight: 600; }
+  .scene-picker-item.hidden { display: none; }
+  .scene-picker-footer { display: flex; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--border); justify-content: flex-end; }
+
   .scene-grid { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px; }
   .scene-chip { background: var(--surface2); border: 1px solid var(--border); border-radius: 20px; padding: 3px 10px; font-size: 11px; display: flex; align-items: center; gap: 6px; }
   .scene-num { font-size: 10px; font-weight: 700; color: var(--text-dim); }
@@ -684,12 +712,17 @@ function renderButtonProgramDetail(b, pm, presetNames, trigTrees) {
   const uid = `prog-${b.ButtonID}`;
   let html = '';
 
-  // LED info row
-  const ledLogicLabel = LED_LOGIC[pm.LedLogic] ?? `${pm.LedLogic}`;
+  // LED info row — editable
+  const pmId = pm.ProgrammingModelID;
   const ledRefLabel = pm.ReferencePresetIDForLed ? presetLabel(pm.ReferencePresetIDForLed, presetNames) : '─';
-  html += `<div style="display:flex;gap:16px;margin-bottom:8px;font-size:11px;padding:4px 0;border-bottom:1px solid rgba(255,255,255,0.06)">
-    <span><span style="color:var(--text-dim)">LED Logic:</span> <span style="color:var(--teal)">${ledLogicLabel}</span></span>
-    <span><span style="color:var(--text-dim)">LED Based on:</span> <span style="color:var(--teal)">${ledRefLabel}</span></span>
+  const ledLogicOpts = Object.entries(LED_LOGIC)
+    .map(([v, l]) => `<option value="${v}" ${pm.LedLogic == v ? 'selected' : ''}>${l}</option>`).join('');
+  html += `<div style="display:flex;flex-wrap:wrap;gap:12px;margin-bottom:8px;font-size:11px;padding:4px 0;border-bottom:1px solid rgba(255,255,255,0.06);align-items:center">
+    <span><span style="color:var(--text-dim)">LED Logic: </span><select class="prog-led-logic-sel"
+      onchange="editLedLogic(${pmId}, this.value)">${ledLogicOpts}</select></span>
+    <span class="prog-led-edit" onclick="editLedRef(${pmId}, ${pm.ReferencePresetIDForLed ?? 'null'})">
+      <span style="color:var(--text-dim)">LED Based on: </span><span style="color:var(--teal)">${ledRefLabel}</span><span class="prog-edit-hint">✎</span>
+    </span>
     ${pm.AllowDoubleTap ? '<span style="color:var(--text-dim)">Double Tap ✓</span>' : ''}
     ${pm.HoldTime ? `<span style="color:var(--text-dim)">Hold: ${pm.HoldTime}ms</span>` : ''}
   </div>`;
@@ -731,8 +764,9 @@ function renderButtonProgramDetail(b, pm, presetNames, trigTrees) {
       html += '</div>';
     } else if (fallback) {
       const lbl = presetLabel(fallback, presetNames);
-      html += `<div class="prog-actions"><div class="prog-line">
-        <span style="color:var(--text-dim)">Run </span><span class="prog-action">${lbl}</span>
+      html += `<div class="prog-actions"><div class="prog-line prog-line-run"
+        onclick="editPmPreset(${pmId}, '${td.pmKey}', ${fallback})">
+        <span style="color:var(--text-dim)">Run </span><span class="prog-action">${lbl}</span><span class="prog-edit-hint">✎</span>
       </div></div>`;
     } else {
       html += `<div class="prog-no-data">アクションなし</div>`;
@@ -820,15 +854,25 @@ function renderActionList(actions, presetNames, depth, pm) {
       }
       html += `<div class="prog-line" style="padding-left:${pad}px"><span class="prog-keyword">End If</span></div>`;
     } else {
-      // Run / Stop action
+      // Run / Stop action — editable
       const label = presetLabel(act.PresetId, presetNames);
       const execType = act.ExecutionType === 1 ? 'Run' : 'Stop';
-      html += `<div class="prog-line" style="padding-left:${pad}px"><span style="color:var(--text-dim)">${execType} </span><span class="prog-action">${label}</span></div>`;
+      if (execType === 'Run' && act.ActionID) {
+        const pmId = pm ? pm.ProgrammingModelID : null;
+        html += `<div class="prog-line prog-line-run" style="padding-left:${pad}px"
+          onclick="editRunAction(${act.ActionID}, ${act.PresetId ?? 'null'}, ${pmId ?? 'null'})">
+          <span style="color:var(--text-dim)">Run </span><span class="prog-action">${label}</span><span class="prog-edit-hint">✎</span>
+        </div>`;
+      } else {
+        html += `<div class="prog-line" style="padding-left:${pad}px"><span style="color:var(--text-dim)">${execType} </span><span class="prog-action">${label}</span></div>`;
+      }
     }
   });
 
   return html;
 }
+
+const _expandedButtons = new Set();
 
 function toggleProgDetail(uid) {
   const el = document.getElementById(uid);
@@ -836,6 +880,7 @@ function toggleProgDetail(uid) {
   if (!el) return;
   const isOpen = el.classList.toggle('open');
   if (chev) chev.classList.toggle('open', isOpen);
+  if (isOpen) _expandedButtons.add(uid); else _expandedButtons.delete(uid);
 }
 
 async function inspectCondition(actionId) {
@@ -870,6 +915,199 @@ async function inspectCondition(actionId) {
   // Show all raw column names so we can identify condition columns
   out += `\n【tblAction 全カラム】\n${(d.action_columns || []).join(', ')}\n`;
   showTextModal(`Conditional Action #${actionId}`, out);
+}
+
+// ── Programs editing ──────────────────────────
+let _sharedScenesCache = null;  // shared scenes (same for all buttons)
+let _localPresetsCache = {};    // pm_id → local presets
+let _scenePickerCallback = null;
+
+async function loadScenes(pmId) {
+  // Fetch shared scenes if not cached
+  if (!_sharedScenesCache) {
+    const res = await fetch('/api/scenes');
+    const d = await res.json();
+    _sharedScenesCache = d.shared_scenes || [];
+  }
+  // Fetch local presets for this PM if needed
+  let localPresets = [];
+  if (pmId) {
+    if (!_localPresetsCache[pmId]) {
+      const res2 = await fetch(`/api/scenes?pm_id=${pmId}`);
+      const d2 = await res2.json();
+      _localPresetsCache[pmId] = d2.local_presets || [];
+    }
+    localPresets = _localPresetsCache[pmId];
+  }
+  return { shared: _sharedScenesCache, local: localPresets };
+}
+
+function markDirty() {
+  isDirty = true;
+  document.getElementById('save-btn').disabled = !isPl;
+  const db = document.getElementById('dirty-badge');
+  if (!db) {
+    const bar = document.getElementById('place-bar');
+    const span = document.createElement('span');
+    span.id = 'dirty-badge';
+    span.style.cssText = 'display:inline-block;background:var(--orange);color:#000;font-size:10px;font-weight:700;padding:1px 7px;border-radius:10px;';
+    span.textContent = '● 未保存';
+    bar.appendChild(span);
+  }
+}
+
+async function reloadPrograms() {
+  if (!currentAreaId) return;
+  markDirty();
+  const res = await fetch(`/api/area/${currentAreaId}/programs`);
+  const prog = res.ok ? await res.json() : {};
+  const panel = document.getElementById('tab-programs');
+  if (!panel) return;
+  panel.innerHTML = renderProgramsTab(prog);
+  _expandedButtons.forEach(uid => {
+    const el = document.getElementById(uid);
+    if (el) {
+      el.classList.add('open');
+      const chev = document.getElementById(uid + '-chev');
+      if (chev) chev.classList.add('open');
+    }
+  });
+  showToast('更新しました');
+}
+
+// Store current pm_id for filtering
+let _currentPickerPmId = null;
+
+function showScenePicker(title, currentPresetId, pmId, callback) {
+  _scenePickerCallback = callback;
+  _currentPickerPmId = pmId || null;
+  const overlay = document.createElement('div');
+  overlay.className = 'scene-picker-overlay';
+  overlay.id = 'scene-picker-overlay';
+  overlay.innerHTML = `
+    <div class="scene-picker-modal" onclick="event.stopPropagation()">
+      <div class="scene-picker-header">
+        <span>${title}</span>
+        <button onclick="document.getElementById('scene-picker-overlay').remove()">✕</button>
+      </div>
+      <input class="scene-picker-search" type="text" placeholder="🔍 検索..." oninput="filterScenesList(this.value)" autofocus>
+      <div class="scene-picker-list" id="scene-picker-list"><div style="padding:16px;color:var(--text-dim);font-size:12px">読み込み中...</div></div>
+      <div class="scene-picker-footer">
+        <button class="btn btn-outline" style="font-size:11px;padding:4px 10px" onclick="selectScene(null, 'なし')">Clear (なし)</button>
+        <button class="btn" style="font-size:11px;padding:4px 10px;background:var(--surface2);color:var(--text-dim)" onclick="document.getElementById('scene-picker-overlay').remove()">キャンセル</button>
+      </div>
+    </div>`;
+  overlay.addEventListener('click', () => overlay.remove());
+  document.body.appendChild(overlay);
+  loadScenes(_currentPickerPmId).then(data => renderScenePickerList(data, currentPresetId));
+}
+
+function renderScenePickerList(data, currentPresetId, filter) {
+  const list = document.getElementById('scene-picker-list');
+  if (!list) return;
+  const q = (filter || '').toLowerCase();
+  const { shared = [], local = [] } = data;
+
+  const matchItem = (name, group) => !q || `${name} ${group}`.toLowerCase().includes(q);
+
+  let html = '';
+
+  // Button-local presets first (if any)
+  if (local.length) {
+    const vis = local.filter(p => matchItem(p.Name || '', 'ボタンアクション'));
+    if (vis.length) {
+      html += `<div class="scene-picker-group">ボタンアクション</div>`;
+      vis.forEach(p => {
+        const name = p.Name || `Preset ${p.PresetID}`;
+        const isCur = p.PresetID === currentPresetId;
+        html += `<div class="scene-picker-item ${isCur ? 'is-current' : ''}"
+          onclick="selectScene(${p.PresetID}, '${name.replace(/'/g, "\\'")}')">
+          ${isCur ? '● ' : ''}${name}</div>`;
+      });
+    }
+  }
+
+  // Shared scenes grouped by area
+  const groups = {};
+  shared.forEach(s => {
+    const key = s.AreaName || '(その他)';
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(s);
+  });
+  Object.entries(groups).forEach(([area, items]) => {
+    const vis = items.filter(s => matchItem(s.Name || '', area));
+    if (!vis.length) return;
+    html += `<div class="scene-picker-group">共有シーン — ${area}</div>`;
+    vis.forEach(s => {
+      const name = s.Name || `Preset ${s.PresetID}`;
+      const isCur = s.PresetID === currentPresetId;
+      html += `<div class="scene-picker-item ${isCur ? 'is-current' : ''}"
+        onclick="selectScene(${s.PresetID}, '${name.replace(/'/g, "\\'")}')">
+        ${isCur ? '● ' : ''}${name}</div>`;
+    });
+  });
+
+  list.innerHTML = html || '<div style="padding:16px;color:var(--text-dim);font-size:12px">見つかりません</div>';
+}
+
+function filterScenesList(value) {
+  loadScenes(_currentPickerPmId).then(data => renderScenePickerList(data, null, value));
+}
+
+function selectScene(sceneId, sceneName) {
+  document.getElementById('scene-picker-overlay')?.remove();
+  if (_scenePickerCallback) { _scenePickerCallback(sceneId, sceneName); _scenePickerCallback = null; }
+}
+
+function editRunAction(actionId, currentPresetId, pmId) {
+  showScenePicker('Run シーンを変更', currentPresetId, pmId, async (sceneId) => {
+    const res = await fetch(`/api/action/${actionId}/preset`, {
+      method: 'PUT', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({preset_id: sceneId}),
+    });
+    const d = await res.json();
+    if (d.error) { showToast('エラー: ' + d.error); return; }
+    if (pmId) delete _localPresetsCache[pmId]; // invalidate local cache
+    await reloadPrograms();
+  });
+}
+
+function editPmPreset(pmId, pmKey, currentPresetId) {
+  const lmap = {PressPresetID:'Press', ReleasePresetID:'Release', HoldPresetId:'Hold',
+    DoubleTapPresetID:'Double Tap', PresetID:'Scene', OnPresetID:'On/Open', OffPresetID:'Off/Close'};
+  showScenePicker(`${lmap[pmKey] || pmKey} シーンを変更`, currentPresetId, pmId, async (sceneId) => {
+    const body = {[pmKey]: sceneId};
+    if (pmKey === 'PressPresetID') body.PresetID = sceneId;
+    const res = await fetch(`/api/pm/${pmId}`, {
+      method: 'PUT', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    const d = await res.json();
+    if (d.error) { showToast('エラー: ' + d.error); return; }
+    await reloadPrograms();
+  });
+}
+
+function editLedRef(pmId, currentPresetId) {
+  showScenePicker('LED Based on を変更', currentPresetId, pmId, async (sceneId) => {
+    const res = await fetch(`/api/pm/${pmId}`, {
+      method: 'PUT', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ReferencePresetIDForLed: sceneId}),
+    });
+    const d = await res.json();
+    if (d.error) { showToast('エラー: ' + d.error); return; }
+    await reloadPrograms();
+  });
+}
+
+async function editLedLogic(pmId, value) {
+  const res = await fetch(`/api/pm/${pmId}`, {
+    method: 'PUT', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({LedLogic: parseInt(value)}),
+  });
+  const d = await res.json();
+  if (d.error) showToast('エラー: ' + d.error);
+  else { markDirty(); showToast('LED Logic 更新しました'); }
 }
 
 async function showProgSchema() {

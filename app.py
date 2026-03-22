@@ -1230,33 +1230,25 @@ def area_programs(area_id):
             if pm.get(field):
                 preset_id_set.add(pm[field])
 
-    # Try to get preset names from tblScene (scenes are "actions" in LD terminology)
+    # Look up preset names from tblPreset (tblAction.PresetId always references tblPreset)
     preset_names = {}
     if preset_id_set:
         ph3 = ",".join("?" * len(preset_id_set))
         preset_list = list(preset_id_set)
-        # tblScene: SceneID may match PresetID in programming models
-        scene_rows = _try_q(f"""
-            SELECT s.SceneID, s.Name, s.Number, sc.Name as ControllerName
-            FROM tblScene s
-            JOIN tblSceneController sc ON s.ParentSceneControllerID = sc.SceneControllerID
-            WHERE s.SceneID IN ({ph3})
+        preset_rows = _try_q(f"""
+            SELECT p.PresetID, p.Name, p.ParentID, p.ParentType,
+                   a.Name AS AreaName
+            FROM tblPreset p
+            LEFT JOIN tblArea a ON p.ParentType = 2 AND p.ParentID = a.AreaID
+            WHERE p.PresetID IN ({ph3})
         """, preset_list)
-        if scene_rows and not scene_rows[0].get("__error__"):
-            for r in scene_rows:
-                preset_names[r["SceneID"]] = {"name": r["Name"], "number": r["Number"], "controller": r["ControllerName"]}
-
-        # Also try tblPreset directly for any remaining IDs
-        missing = [pid for pid in preset_list if pid not in preset_names]
-        if missing:
-            ph4 = ",".join("?" * len(missing))
-            preset_rows = _try_q(f"""
-                SELECT PresetID, Name FROM tblPreset WHERE PresetID IN ({ph4})
-            """, missing)
-            if preset_rows and not preset_rows[0].get("__error__"):
-                for r in preset_rows:
-                    if r["PresetID"] not in preset_names:
-                        preset_names[r["PresetID"]] = {"name": r.get("Name", str(r["PresetID"])), "number": None, "controller": None}
+        if preset_rows and not preset_rows[0].get("__error__"):
+            for r in preset_rows:
+                preset_names[r["PresetID"]] = {
+                    "name": r.get("Name") or str(r["PresetID"]),
+                    "number": None,
+                    "controller": r.get("AreaName"),
+                }
 
     # Build trigger trees for all PM parents (ButtonGroup IDs and direct PM IDs)
     # Try both: ButtonGroup parent IDs and direct PM IDs as trigger parents
@@ -1294,24 +1286,21 @@ def area_programs(area_id):
         missing_presets = [pid for pid in preset_id_set if pid not in preset_names]
         if missing_presets:
             ph_m = ",".join("?" * len(missing_presets))
-            s2 = _try_q(f"""
-                SELECT s.SceneID, s.Name, s.Number, sc.Name as ControllerName
-                FROM tblScene s
-                JOIN tblSceneController sc ON s.ParentSceneControllerID = sc.SceneControllerID
-                WHERE s.SceneID IN ({ph_m})
+            pr2 = _try_q(f"""
+                SELECT p.PresetID, p.Name, p.ParentType,
+                       a.Name AS AreaName
+                FROM tblPreset p
+                LEFT JOIN tblArea a ON p.ParentType = 2 AND p.ParentID = a.AreaID
+                WHERE p.PresetID IN ({ph_m})
             """, missing_presets)
-            if s2 and not s2[0].get("__error__"):
-                for r in s2:
-                    preset_names[r["SceneID"]] = {"name": r["Name"], "number": r["Number"], "controller": r["ControllerName"]}
-            # Also try tblPreset for any still missing
-            still_missing = [pid for pid in missing_presets if pid not in preset_names]
-            if still_missing:
-                ph_sm = ",".join("?" * len(still_missing))
-                pr = _try_q(f"SELECT PresetID, Name FROM tblPreset WHERE PresetID IN ({ph_sm})", still_missing)
-                if pr and not pr[0].get("__error__"):
-                    for r in pr:
-                        if r["PresetID"] not in preset_names:
-                            preset_names[r["PresetID"]] = {"name": r.get("Name", str(r["PresetID"])), "number": None, "controller": None}
+            if pr2 and not pr2[0].get("__error__"):
+                for r in pr2:
+                    if r["PresetID"] not in preset_names:
+                        preset_names[r["PresetID"]] = {
+                            "name": r.get("Name") or str(r["PresetID"]),
+                            "number": None,
+                            "controller": r.get("AreaName"),
+                        }
 
     return jsonify({
         "stations": stations,
@@ -1363,6 +1352,91 @@ def debug_area(area_id):
         "SELECT * FROM tblSwitchLeg WHERE ParentID = ?", (area_id,)
     )
     return jsonify({"zones": result, "orphaned_switchlegs": orphan_sls})
+
+
+# ── Program editing ───────────────────────────
+
+@app.route("/api/scenes")
+def all_scenes():
+    """Return callable presets for the scene picker.
+
+    Shared programmable scenes (PresetType=3, ParentType=2) are always returned.
+    Button-local action presets (PresetType=1, ParentType=231) are returned only
+    when ?pm_id=<id> is provided, filtered to that programming model.
+    """
+    if not state["db_name"]:
+        return jsonify({"error": "DB未接続"}), 400
+
+    pm_id = request.args.get("pm_id", type=int)
+
+    # Shared programmable scenes — callable from any button
+    shared = _try_q("""
+        SELECT p.PresetID, p.Name, p.ParentID AS AreaID,
+               a.Name AS AreaName
+        FROM tblPreset p
+        LEFT JOIN tblArea a ON p.ParentID = a.AreaID
+        WHERE p.PresetType = 3 AND p.ParentType = 2
+        ORDER BY a.Name, p.Name
+    """)
+    if shared and shared[0].get("__error__"):
+        shared = []
+
+    # Button-local action presets — only for the current PM
+    local_presets = []
+    if pm_id:
+        lp = _try_q("""
+            SELECT p.PresetID, p.Name
+            FROM tblPreset p
+            WHERE p.PresetType = 1 AND p.ParentType = 231 AND p.ParentID = ?
+            ORDER BY p.SortOrder, p.Name
+        """, (pm_id,))
+        if lp and not lp[0].get("__error__"):
+            local_presets = lp
+
+    return jsonify({"shared_scenes": shared or [], "local_presets": local_presets})
+
+
+@app.route("/api/action/<int:action_id>/preset", methods=["PUT"])
+def update_action_preset(action_id):
+    """Update PresetId for a Run action (ObjectType=234)."""
+    if not state["db_name"]:
+        return jsonify({"error": "DB未接続"}), 400
+    data = request.json or {}
+    preset_id = data.get("preset_id")  # None → clear
+    try:
+        execute_sql(
+            "UPDATE tblAction SET PresetId = ? WHERE ActionID = ? AND ObjectType = 234",
+            (preset_id, action_id)
+        )
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/pm/<int:pm_id>", methods=["PUT"])
+def update_pm(pm_id):
+    """Update ProgrammingModel fields (presets, LED logic, etc.)."""
+    if not state["db_name"]:
+        return jsonify({"error": "DB未接続"}), 400
+    data = request.json or {}
+    allowed = {
+        "PressPresetID", "ReleasePresetID", "HoldPresetId", "DoubleTapPresetID",
+        "PresetID", "OnPresetID", "OffPresetID",
+        "ReferencePresetIDForLed", "LedLogic", "AllowDoubleTap", "HoldTime",
+    }
+    updates = {k: v for k, v in data.items() if k in allowed}
+    if not updates:
+        return jsonify({"error": "更新するフィールドがありません"}), 400
+    sets = ", ".join(f"[{k}] = ?" for k in updates)
+    vals = list(updates.values()) + [pm_id]
+    try:
+        execute_sql(
+            f"UPDATE tblProgrammingModel SET {sets}, NeedsTransfer = 1 WHERE ProgrammingModelID = ?",
+            vals
+        )
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 # ── Save back to .pl ──────────────────────────
