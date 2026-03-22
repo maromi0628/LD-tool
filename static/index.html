@@ -110,6 +110,10 @@
   .prog-event-tab:first-child { border-radius: 4px 0 0 4px; }
   .prog-event-tab:last-child { border-right: 1px solid var(--border); border-radius: 0 4px 4px 0; }
   .prog-event-tab.active { background: var(--accent2); color: #fff; border-color: var(--accent2); }
+  .prog-event-tab.has-data { color: var(--text); }
+  .prog-event-tab.active.has-data { color: #fff; }
+  .prog-event-panel { display: none; }
+  .prog-event-panel.active { display: block; }
   .prog-actions { font-family: monospace; font-size: 11px; line-height: 1.6; color: var(--text); }
   .prog-actions .prog-line { padding: 1px 0; }
   .prog-actions .prog-keyword { color: #c586c0; font-weight: 600; }
@@ -645,9 +649,39 @@ function renderProgramsTab(prog) {
   return html;
 }
 
+function getEventTabDefs(b, pm, eventMap) {
+  const isCCO = b.ProgModel === 'CAPM';
+  if (isCCO) {
+    return [
+      {key: 1, label: 'Open',       pmKey: 'OnPresetID'},
+      {key: 2, label: 'Close',      pmKey: 'OffPresetID'},
+    ];
+  }
+  const tabs = [
+    {key: 1, label: 'Press',      pmKey: 'PressPresetID'},
+    {key: 2, label: 'Release',    pmKey: 'ReleasePresetID'},
+    {key: 3, label: 'Double Tap', pmKey: 'DoubleTapPresetID'},
+    {key: 4, label: 'Hold',       pmKey: 'HoldPresetId'},
+  ];
+  // Only show Double Tap and Hold tabs if they have content or are enabled
+  return tabs.filter(t => {
+    if (t.key === 3) return pm.AllowDoubleTap || (eventMap[3] && eventMap[3].length) || pm.DoubleTapPresetID;
+    if (t.key === 4) return pm.HoldTime || pm.HoldPresetId || (eventMap[4] && eventMap[4].length);
+    return true;
+  });
+}
+
+function getFallbackPreset(pm, pmKey) {
+  if (!pmKey) return null;
+  // PressPresetID fallback also checks PresetID
+  if (pmKey === 'PressPresetID') return pm.PressPresetID || pm.PresetID;
+  return pm[pmKey] || null;
+}
+
 function renderButtonProgramDetail(b, pm, presetNames, trigTrees) {
   if (!pm) return '<div class="prog-no-data">Programming Model データなし</div>';
 
+  const uid = `prog-${b.ButtonID}`;
   let html = '';
 
   // LED info row
@@ -660,50 +694,107 @@ function renderButtonProgramDetail(b, pm, presetNames, trigTrees) {
     ${pm.HoldTime ? `<span style="color:var(--text-dim)">Hold: ${pm.HoldTime}ms</span>` : ''}
   </div>`;
 
-  // Try to find the trigger tree for this button's PM
-  // Key by ButtonGroupID (ParentID when ParentType=57) or by PM ID directly
-  const tree = trigTrees[pm.ParentID] || trigTrees[pm.ProgrammingModelID] || null;
+  // Build eventMap: TriggerType → actions[]
+  const tree = trigTrees[pm.ParentID] || trigTrees[pm.ProgrammingModelID] || [];
+  const eventMap = {};
+  tree.forEach(trig => {
+    if (!eventMap[trig.TriggerType]) eventMap[trig.TriggerType] = [];
+    eventMap[trig.TriggerType].push(...trig.actions);
+  });
 
-  if (tree && tree.length) {
-    html += '<div class="prog-actions">';
-    tree.forEach(trig => {
-      const tLabel = TRIGGER_TYPE[trig.TriggerType] || `Event:${trig.TriggerType}`;
-      // Only show events that have actions
-      if (!trig.actions.length) return;
-      html += `<div class="prog-line"><span class="prog-keyword">${tLabel}</span></div>`;
-      html += renderActionList(trig.actions, presetNames, 1);
-    });
-    html += '</div>';
-  } else {
-    // Fallback: show simple preset-based actions from PM fields
-    const simpleEvents = [
-      {label:'Press',     presetId: pm.PressPresetID || pm.PresetID, color:'#9cdcfe'},
-      {label:'Release',   presetId: pm.ReleasePresetID,               color:'#c586c0'},
-      {label:'Double Tap',presetId: pm.DoubleTapPresetID,             color:'#dcdcaa'},
-      {label:'Hold',      presetId: pm.HoldPresetId,                  color:'#e8b060'},
-      {label:'On',        presetId: pm.OnPresetID,                    color:'#5cb85c'},
-      {label:'Off',       presetId: pm.OffPresetID,                   color:'#d9534f'},
-    ].filter(e => e.presetId);
+  // Also collect any unknown trigger types (not 1-4) to show as-is
+  const knownKeys = new Set([1, 2, 3, 4]);
+  const extraTypes = Object.keys(eventMap).map(Number).filter(k => !knownKeys.has(k));
 
-    if (simpleEvents.length) {
+  const tabDefs = getEventTabDefs(b, pm, eventMap);
+
+  // Build sub-tabs
+  html += `<div class="prog-event-tabs">`;
+  tabDefs.forEach((td, i) => {
+    const treeActions = eventMap[td.key] || [];
+    const fallback = getFallbackPreset(pm, td.pmKey);
+    const hasData = treeActions.length > 0 || !!fallback;
+    html += `<div class="prog-event-tab ${i === 0 ? 'active' : ''} ${hasData ? 'has-data' : ''}"
+      id="${uid}-etab-${td.key}"
+      onclick="switchEventTab('${uid}', ${td.key})">${td.label}</div>`;
+  });
+  html += `</div>`;
+
+  // Build content panels
+  tabDefs.forEach((td, i) => {
+    const treeActions = eventMap[td.key] || [];
+    const fallback = getFallbackPreset(pm, td.pmKey);
+    html += `<div class="prog-event-panel ${i === 0 ? 'active' : ''}" id="${uid}-epanel-${td.key}">`;
+    if (treeActions.length) {
       html += '<div class="prog-actions">';
-      simpleEvents.forEach(e => {
-        const label = presetLabel(e.presetId, presetNames);
-        html += `<div class="prog-line">
-          <span class="prog-keyword" style="color:${e.color};min-width:80px;display:inline-block">${e.label}</span>
-          <span style="color:var(--text-dim)">Run </span><span class="prog-action">${label}</span>
-        </div>`;
-      });
+      html += renderActionList(treeActions, presetNames, 0, pm);
       html += '</div>';
+    } else if (fallback) {
+      const lbl = presetLabel(fallback, presetNames);
+      html += `<div class="prog-actions"><div class="prog-line">
+        <span style="color:var(--text-dim)">Run </span><span class="prog-action">${lbl}</span>
+      </div></div>`;
     } else {
-      html += `<div class="prog-no-data" style="margin-top:4px">${pm.Name} — アクションデータが見つかりませんでした</div>`;
+      html += `<div class="prog-no-data">アクションなし</div>`;
     }
+    html += `</div>`;
+  });
+
+  // Extra (unknown) event types shown generically below tabs
+  if (extraTypes.length) {
+    html += `<div class="prog-actions" style="margin-top:8px;padding-top:6px;border-top:1px solid rgba(255,255,255,0.06)">`;
+    extraTypes.forEach(k => {
+      const tLabel = TRIGGER_TYPE[k] || `Event:${k}`;
+      if (!(eventMap[k] || []).length) return;
+      html += `<div class="prog-line"><span class="prog-keyword">${tLabel}</span></div>`;
+      html += renderActionList(eventMap[k], presetNames, 1, pm);
+    });
+    html += `</div>`;
   }
 
   return html;
 }
 
-function renderActionList(actions, presetNames, depth) {
+function switchEventTab(uid, tabKey) {
+  document.querySelectorAll(`[id^="${uid}-epanel-"]`).forEach(el => el.classList.remove('active'));
+  document.querySelectorAll(`[id^="${uid}-etab-"]`).forEach(el => el.classList.remove('active'));
+  const panel = document.getElementById(`${uid}-epanel-${tabKey}`);
+  const tab = document.getElementById(`${uid}-etab-${tabKey}`);
+  if (panel) panel.classList.add('active');
+  if (tab) tab.classList.add('active');
+}
+
+// ── Condition text builder ────────────────────
+// tblAction (ObjectType=233) and tblTrigger have NO condition-specific columns.
+// Condition type is encoded in the TriggerType of the sub-trigger:
+//   TriggerType=5 → "If LED is On" (current button's LED)
+//   TriggerType=6 → "Else"
+// The LED reference comes from PM.ReferencePresetIDForLed.
+// WhereUsedId=2147483647 is a sentinel (Int32.Max) — ignore it.
+
+function buildConditionText(act, presetNames, pm) {
+  if (act.Notes && act.Notes.trim()) return act.Notes;
+
+  const subTrigs = act.sub_triggers || [];
+  const thenTrig = subTrigs.find(st => st.TriggerType === 5);
+
+  if (thenTrig) {
+    // TriggerType=5 = "If LED is On" — resolve which LED from PM
+    if (pm && pm.ReferencePresetIDForLed && presetNames) {
+      const ref = presetLabel(pm.ReferencePresetIDForLed, presetNames);
+      return `${ref} LED is On`;
+    }
+    return 'LED is On';
+  }
+
+  // Unknown condition type (TriggerType not yet mapped)
+  const unknownTrig = subTrigs.find(st => st.TriggerType !== 5 && st.TriggerType !== 6);
+  if (unknownTrig) return `(TriggerType:${unknownTrig.TriggerType})`;
+
+  return null;
+}
+
+function renderActionList(actions, presetNames, depth, pm) {
   if (!actions || !actions.length) return '';
   const pad = depth * 16;
   let html = '';
@@ -717,12 +808,15 @@ function renderActionList(actions, presetNames, depth) {
       const subTrigs = act.sub_triggers || [];
       const thenBranch = subTrigs.filter(st => st.TriggerType === 5);
       const elseBranch = subTrigs.filter(st => st.TriggerType === 6);
-      const condText = act.Notes ? act.Notes : `(condition)`;
-      html += `<div class="prog-line" style="padding-left:${pad}px"><span class="prog-keyword">If</span> <span class="prog-condition">${condText}</span> <span class="prog-keyword">Then</span> <button onclick="inspectCondition(${act.ActionID})" style="font-size:9px;padding:0 4px;background:rgba(255,255,255,0.1);border:none;color:var(--text-dim);cursor:pointer;border-radius:3px">🔍</button></div>`;
-      thenBranch.forEach(st => { html += renderActionList(st.actions, presetNames, depth + 1); });
+      const condText = buildConditionText(act, presetNames, pm);
+      const condDisplay = condText
+        ? `<span class="prog-condition">${condText}</span>`
+        : `<span style="color:var(--text-dim);font-style:italic">(condition)</span>`;
+      html += `<div class="prog-line" style="padding-left:${pad}px"><span class="prog-keyword">If</span> ${condDisplay} <span class="prog-keyword">Then</span> <button onclick="inspectCondition(${act.ActionID})" style="font-size:9px;padding:0 4px;background:rgba(255,255,255,0.1);border:none;color:var(--text-dim);cursor:pointer;border-radius:3px" title="条件の生データを確認">🔍</button></div>`;
+      thenBranch.forEach(st => { html += renderActionList(st.actions, presetNames, depth + 1, pm); });
       if (elseBranch.length) {
         html += `<div class="prog-line" style="padding-left:${pad}px"><span class="prog-keyword">Else</span></div>`;
-        elseBranch.forEach(st => { html += renderActionList(st.actions, presetNames, depth + 1); });
+        elseBranch.forEach(st => { html += renderActionList(st.actions, presetNames, depth + 1, pm); });
       }
       html += `<div class="prog-line" style="padding-left:${pad}px"><span class="prog-keyword">End If</span></div>`;
     } else {
@@ -747,10 +841,34 @@ function toggleProgDetail(uid) {
 async function inspectCondition(actionId) {
   const res = await fetch(`/api/conditional-detail/${actionId}`);
   const d = await res.json();
-  let out = `=== Conditional Action ID: ${actionId} ===\n\n`;
-  out += `カラム: ${(d.action_columns || []).join(', ')}\n\n`;
-  out += `Action データ:\n${JSON.stringify(d.action, null, 2)}\n\n`;
-  out += `Sub-Triggers:\n${JSON.stringify(d.sub_triggers, null, 2)}\n`;
+  const act = d.action || {};
+  const subTrigs = d.sub_triggers || [];
+
+  // Show only non-null, non-zero columns for readability
+  const skipCols = new Set(['ActionID','ObjectType','ParentID','ParentType','SortOrder']);
+  function fmtRow(row) {
+    return Object.entries(row)
+      .filter(([k, v]) => v !== null && v !== undefined && v !== 0 && v !== '')
+      .map(([k, v]) => `  ${k.padEnd(32)}: ${v}`)
+      .join('\n');
+  }
+
+  let out = `=== Conditional Action #${actionId} ===\n`;
+  out += `ObjectType: ${act.ObjectType}  ParentID: ${act.ParentID}\n\n`;
+  out += `【Action 有効カラム】\n${fmtRow(act) || '  (なし)'}\n\n`;
+
+  if (subTrigs.length) {
+    const typeLabel = {5: 'Then (If)', 6: 'Else'};
+    subTrigs.forEach((st, i) => {
+      const lbl = typeLabel[st.TriggerType] || `TriggerType:${st.TriggerType}`;
+      out += `【Sub-Trigger ${i+1}: ${lbl}】\n${fmtRow(st) || '  (なし)'}\n\n`;
+    });
+  } else {
+    out += '(Sub-Triggerなし)\n';
+  }
+
+  // Show all raw column names so we can identify condition columns
+  out += `\n【tblAction 全カラム】\n${(d.action_columns || []).join(', ')}\n`;
   showTextModal(`Conditional Action #${actionId}`, out);
 }
 

@@ -177,6 +177,8 @@ def sqlite_rows(path, query, params=()):
 
 def extract_pl_to_temp(pl_path):
     """Extract .pl (ZIP) to a fresh temp dir and return its path."""
+    if not zipfile.is_zipfile(pl_path):
+        raise ValueError(f"このファイルはZIP形式の .pl ファイルではありません: {os.path.basename(pl_path)}")
     out = tempfile.mkdtemp(prefix="ld_pl_")
     with zipfile.ZipFile(pl_path) as z:
         z.extractall(out)
@@ -368,7 +370,10 @@ def open_file():
         if state["work_dir"] and state["pl_path"]:
             shutil.rmtree(state["work_dir"], ignore_errors=True)
 
-        work_dir = extract_pl_to_temp(path)
+        try:
+            work_dir = extract_pl_to_temp(path)
+        except (ValueError, zipfile.BadZipFile) as e:
+            return jsonify({"error": str(e)}), 400
         state["pl_path"] = path
         state["work_dir"] = work_dir
 
@@ -983,10 +988,9 @@ def _build_trigger_tree(trigger_rows, preset_ids, depth=0):
     trig_ids = [r["TriggerID"] for r in trigger_rows]
     ph = ",".join("?" * len(trig_ids))
 
+    # SELECT * so all condition columns (LED reference, time range, etc.) flow to the frontend
     action_rows = _try_q(f"""
-        SELECT ActionID, ObjectType, ParentID, SortOrder,
-               DelayTime, ExecutionType, PresetId, Notes
-        FROM tblAction
+        SELECT * FROM tblAction
         WHERE ParentID IN ({ph}) AND ParentType = 232
         ORDER BY ParentID, SortOrder
     """, trig_ids)
@@ -998,28 +1002,19 @@ def _build_trigger_tree(trigger_rows, preset_ids, depth=0):
             k = r["ParentID"]
             if k not in actions_by_trig:
                 actions_by_trig[k] = []
-            act = {
-                "ActionID": r["ActionID"],
-                "ObjectType": r["ObjectType"],
-                "SortOrder": r["SortOrder"],
-                "DelayTime": r["DelayTime"],
-                "ExecutionType": r["ExecutionType"],
-                "PresetId": r["PresetId"],
-                "Notes": r["Notes"],
-                "sub_triggers": [],
-            }
+            act = dict(r)          # pass ALL columns through
+            act["sub_triggers"] = []
             if r.get("PresetId"):
                 preset_ids.add(r["PresetId"])
             if r["ObjectType"] == 233:
                 cond_action_ids.append(r["ActionID"])
             actions_by_trig[k].append(act)
 
-    # For conditional actions, recursively get sub-triggers
+    # For conditional actions, recursively get sub-triggers (SELECT * for condition details)
     if cond_action_ids:
         ph2 = ",".join("?" * len(cond_action_ids))
         sub_trig_rows = _try_q(f"""
-            SELECT TriggerID, TriggerType, ParentId, SortOrder
-            FROM tblTrigger
+            SELECT * FROM tblTrigger
             WHERE ParentId IN ({ph2})
             ORDER BY ParentId, TriggerType, SortOrder
         """, cond_action_ids)
@@ -1030,8 +1025,9 @@ def _build_trigger_tree(trigger_rows, preset_ids, depth=0):
                 k = r["ParentId"]
                 if k not in by_cond:
                     by_cond[k] = []
-                by_cond[k].append({"TriggerID": r["TriggerID"], "TriggerType": r["TriggerType"],
-                                    "SortOrder": r["SortOrder"], "actions": []})
+                trig_entry = dict(r)   # pass ALL columns through
+                trig_entry["actions"] = []
+                by_cond[k].append(trig_entry)
 
             # Recursively build sub-trees and attach
             for cond_id, sub_trigs in by_cond.items():
@@ -1274,8 +1270,7 @@ def area_programs(area_id):
     if parent_ids_to_try:
         ph_p = ",".join("?" * len(parent_ids_to_try))
         root_trig_rows = _try_q(f"""
-            SELECT TriggerID, TriggerType, ParentId, SortOrder
-            FROM tblTrigger
+            SELECT * FROM tblTrigger
             WHERE ParentId IN ({ph_p})
             ORDER BY ParentId, SortOrder
         """, list(parent_ids_to_try))
@@ -1286,8 +1281,9 @@ def area_programs(area_id):
                 k = r["ParentId"]
                 if k not in by_parent:
                     by_parent[k] = []
-                by_parent[k].append({"TriggerID": r["TriggerID"], "TriggerType": r["TriggerType"],
-                                      "SortOrder": r["SortOrder"], "actions": []})
+                trig_entry = dict(r)
+                trig_entry["actions"] = []
+                by_parent[k].append(trig_entry)
 
             for parent_id, trigs in by_parent.items():
                 tree = _build_trigger_tree(trigs, preset_id_set)
