@@ -133,6 +133,16 @@
   .prog-led-logic-sel { background: transparent; border: none; color: var(--teal); font-size: 11px; cursor: pointer; padding: 0; font-family: inherit; }
   .prog-led-logic-sel:focus { outline: 1px solid var(--accent); border-radius: 2px; }
   .prog-led-logic-sel option { background: var(--surface2); color: var(--text); }
+  /* Add action button */
+  .prog-add-btn { background: none; border: 1px dashed rgba(255,255,255,0.2); color: var(--text-dim); font-size: 10px; border-radius: 3px; padding: 1px 8px; cursor: pointer; margin-top: 2px; transition: all 0.15s; }
+  .prog-add-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .prog-del-btn { opacity: 0; background: none; border: none; color: #e06c75; font-size: 9px; cursor: pointer; padding: 0 3px; border-radius: 2px; transition: opacity 0.15s; }
+  .prog-line:hover .prog-del-btn { opacity: 0.6; }
+  .prog-del-btn:hover { opacity: 1 !important; background: rgba(224,108,117,0.15); }
+  /* Add action popup menu */
+  .add-action-menu { position: fixed; background: var(--surface2); border: 1px solid rgba(255,255,255,0.15); border-radius: 6px; z-index: 2000; min-width: 150px; padding: 4px 0; box-shadow: 0 4px 16px rgba(0,0,0,0.4); }
+  .add-action-menu div { padding: 6px 14px; cursor: pointer; font-size: 11px; color: var(--text); }
+  .add-action-menu div:hover { background: rgba(255,255,255,0.1); }
 
   /* Scene picker modal */
   .scene-picker-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.55); z-index: 1000; display: flex; align-items: center; justify-content: center; }
@@ -732,12 +742,12 @@ function renderButtonProgramDetail(b, pm, presetNames, trigTrees) {
     ${pm.HoldTime ? `<span style="color:var(--text-dim)">Hold: ${pm.HoldTime}ms</span>` : ''}
   </div>`;
 
-  // Build eventMap: TriggerType → actions[]
+  // Build eventMap: TriggerType → {triggerID, actions[]}
   const tree = trigTrees[pm.ParentID] || trigTrees[pm.ProgrammingModelID] || [];
   const eventMap = {};
   tree.forEach(trig => {
-    if (!eventMap[trig.TriggerType]) eventMap[trig.TriggerType] = [];
-    eventMap[trig.TriggerType].push(...trig.actions);
+    if (!eventMap[trig.TriggerType]) eventMap[trig.TriggerType] = {triggerID: trig.TriggerID, actions: []};
+    eventMap[trig.TriggerType].actions.push(...trig.actions);
   });
 
   // Also collect any unknown trigger types (not 1-4) to show as-is
@@ -749,9 +759,10 @@ function renderButtonProgramDetail(b, pm, presetNames, trigTrees) {
   // Build sub-tabs
   html += `<div class="prog-event-tabs">`;
   tabDefs.forEach((td, i) => {
-    const treeActions = eventMap[td.key] || [];
+    const evEntryTab = eventMap[td.key];
+    const treeActionsTab = evEntryTab ? evEntryTab.actions : [];
     const fallback = getFallbackPreset(pm, td.pmKey);
-    const hasData = treeActions.length > 0 || !!fallback;
+    const hasData = treeActionsTab.length > 0 || !!fallback;
     html += `<div class="prog-event-tab ${i === 0 ? 'active' : ''} ${hasData ? 'has-data' : ''}"
       id="${uid}-etab-${td.key}"
       onclick="switchEventTab('${uid}', ${td.key})">${td.label}</div>`;
@@ -760,12 +771,14 @@ function renderButtonProgramDetail(b, pm, presetNames, trigTrees) {
 
   // Build content panels
   tabDefs.forEach((td, i) => {
-    const treeActions = eventMap[td.key] || [];
+    const evEntry = eventMap[td.key];
+    const treeActions = evEntry ? evEntry.actions : [];
+    const triggerId = evEntry ? evEntry.triggerID : null;
     const fallback = getFallbackPreset(pm, td.pmKey);
     html += `<div class="prog-event-panel ${i === 0 ? 'active' : ''}" id="${uid}-epanel-${td.key}">`;
     if (treeActions.length) {
       html += '<div class="prog-actions">';
-      html += renderActionList(treeActions, presetNames, 0, pm);
+      html += renderActionList(treeActions, presetNames, 0, pm, triggerId);
       html += '</div>';
     } else if (fallback) {
       const lbl = presetLabel(fallback, presetNames);
@@ -774,8 +787,11 @@ function renderButtonProgramDetail(b, pm, presetNames, trigTrees) {
         <span style="color:var(--text-dim)">Run </span><span class="prog-action">${lbl}</span><span class="prog-edit-hint">✎</span>
       </div></div>`;
     } else {
-      html += `<div class="prog-no-data">アクションなし</div>`;
+      html += `<div class="prog-no-data" style="font-size:11px;color:var(--text-dim);padding:4px 0">アクションなし</div>`;
     }
+    // Add-action button (use existing trigger or create one for this PM)
+    const addTriggerId = triggerId || null;
+    html += `<div style="padding:2px 0">${renderAddBtn(addTriggerId, pmId, td.key, 0)}</div>`;
     html += `</div>`;
   });
 
@@ -783,10 +799,11 @@ function renderButtonProgramDetail(b, pm, presetNames, trigTrees) {
   if (extraTypes.length) {
     html += `<div class="prog-actions" style="margin-top:8px;padding-top:6px;border-top:1px solid rgba(255,255,255,0.06)">`;
     extraTypes.forEach(k => {
+      const evEntry = eventMap[k];
+      if (!evEntry || !evEntry.actions.length) return;
       const tLabel = TRIGGER_TYPE[k] || `Event:${k}`;
-      if (!(eventMap[k] || []).length) return;
       html += `<div class="prog-line"><span class="prog-keyword">${tLabel}</span></div>`;
-      html += renderActionList(eventMap[k], presetNames, 1, pm);
+      html += renderActionList(evEntry.actions, presetNames, 1, pm, evEntry.triggerID);
     });
     html += `</div>`;
   }
@@ -863,15 +880,37 @@ function buildConditionText(act, presetNames, pm) {
   return null;
 }
 
-function renderActionList(actions, presetNames, depth, pm) {
+function renderAddBtn(triggerId, pmId, triggerType, depth) {
+  const pad = depth * 16;
+  if (triggerId) {
+    return `<button class="prog-add-btn" style="margin-left:${pad}px"
+      onclick="showAddMenu(event,${triggerId},null)">+ 追加</button>`;
+  } else if (pmId && triggerType) {
+    // No trigger yet — need to create one first
+    return `<button class="prog-add-btn" style="margin-left:${pad}px"
+      onclick="showAddMenu(event,null,${pmId},${triggerType})">+ 追加</button>`;
+  }
+  return '';
+}
+
+function renderActionList(actions, presetNames, depth, pm, parentTriggerId) {
   if (!actions || !actions.length) return '';
   const pad = depth * 16;
   let html = '';
 
   actions.forEach(act => {
+    const delBtn = act.ActionID
+      ? `<button class="prog-del-btn" onclick="event.stopPropagation();deleteAction(${act.ActionID})" title="削除">✕</button>`
+      : '';
+
     if (act.ObjectType === 235) {
-      // Delay
-      html += `<div class="prog-line" style="padding-left:${pad}px"><span class="prog-keyword">Delay</span> <span style="color:var(--text-dim)">${act.DelayTime}ms</span></div>`;
+      // Delay — show as hh:mm:ss
+      const ms = act.DelayTime || 0;
+      const h = Math.floor(ms/3600000), m = Math.floor((ms%3600000)/60000), s = Math.floor((ms%60000)/1000);
+      const timeStr = `${h}h ${m}m ${s}s`;
+      html += `<div class="prog-line" style="padding-left:${pad}px">
+        <span class="prog-keyword">Delay</span> <span style="color:var(--text-dim)">${timeStr}</span>${delBtn}</div>`;
+
     } else if (act.ObjectType === 233) {
       // Conditional If/Then/Else/End If
       const subTrigs = act.sub_triggers || [];
@@ -883,13 +922,30 @@ function renderActionList(actions, presetNames, depth, pm) {
       const condDisplay = condText
         ? `<span class="prog-condition prog-line-run" onclick="editCondition(${JSON.stringify(editableCond || null).replace(/"/g, '&quot;')})">${condText}<span class="prog-edit-hint">✎</span></span>`
         : `<span class="prog-condition prog-line-run" onclick="editCondition(${JSON.stringify(editableCond || null).replace(/"/g, '&quot;')})" style="font-style:italic">(condition)<span class="prog-edit-hint">✎</span></span>`;
-      html += `<div class="prog-line" style="padding-left:${pad}px"><span class="prog-keyword">If</span> ${condDisplay} <span class="prog-keyword">Then</span></div>`;
-      thenBranch.forEach(st => { html += renderActionList(st.actions, presetNames, depth + 1, pm); });
+      html += `<div class="prog-line" style="padding-left:${pad}px">
+        <span class="prog-keyword">If</span> ${condDisplay} <span class="prog-keyword">Then</span>${delBtn}</div>`;
+
+      // Then branch
+      thenBranch.forEach(st => {
+        html += renderActionList(st.actions, presetNames, depth + 1, pm, st.TriggerID);
+        html += renderAddBtn(st.TriggerID, null, null, depth + 1);
+      });
+
+      // Else branch
       if (elseBranch.length) {
         html += `<div class="prog-line" style="padding-left:${pad}px"><span class="prog-keyword">Else</span></div>`;
-        elseBranch.forEach(st => { html += renderActionList(st.actions, presetNames, depth + 1, pm); });
+        elseBranch.forEach(st => {
+          html += renderActionList(st.actions, presetNames, depth + 1, pm, st.TriggerID);
+          html += renderAddBtn(st.TriggerID, null, null, depth + 1);
+        });
+      } else {
+        // Show "Add Else" button
+        html += `<div style="padding-left:${pad}px;padding-top:2px">
+          <button class="prog-add-btn" onclick="addElseBranch(${act.ActionID})">+ Else を追加</button>
+        </div>`;
       }
       html += `<div class="prog-line" style="padding-left:${pad}px"><span class="prog-keyword">End If</span></div>`;
+
     } else {
       // Run / Stop action — editable
       const label = presetLabel(act.PresetId, presetNames);
@@ -898,10 +954,11 @@ function renderActionList(actions, presetNames, depth, pm) {
         const pmId = pm ? pm.ProgrammingModelID : null;
         html += `<div class="prog-line prog-line-run" style="padding-left:${pad}px"
           onclick="editRunAction(${act.ActionID}, ${act.PresetId ?? 'null'}, ${pmId ?? 'null'})">
-          <span style="color:var(--text-dim)">Run </span><span class="prog-action">${label}</span><span class="prog-edit-hint">✎</span>
+          <span style="color:var(--text-dim)">Run </span><span class="prog-action">${label}</span><span class="prog-edit-hint">✎</span>${delBtn}
         </div>`;
       } else {
-        html += `<div class="prog-line" style="padding-left:${pad}px"><span style="color:var(--text-dim)">${execType} </span><span class="prog-action">${label}</span></div>`;
+        html += `<div class="prog-line" style="padding-left:${pad}px">
+          <span style="color:var(--text-dim)">${execType} </span><span class="prog-action">${label}</span>${delBtn}</div>`;
       }
     }
   });
@@ -1394,6 +1451,132 @@ async function _saveCondition(evalId, data) {
     method: 'PUT', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify(data),
   });
+  const d = await res.json();
+  if (d.error) { showToast('エラー: ' + d.error); return; }
+  await reloadPrograms();
+}
+
+// ── Add / Delete actions ──────────────────────
+
+function showAddMenu(event, triggerId, pmId, triggerType) {
+  event.stopPropagation();
+  document.querySelectorAll('.add-action-menu').forEach(m => m.remove());
+  const menu = document.createElement('div');
+  menu.className = 'add-action-menu';
+  const items = [
+    {label: 'Run (シーン実行)',  fn: () => doAddRun(triggerId, pmId, triggerType)},
+    {label: 'Delay',            fn: () => doAddDelay(triggerId, pmId, triggerType)},
+    {label: 'If (条件分岐)',    fn: () => doAddIf(triggerId, pmId, triggerType)},
+  ];
+  items.forEach(item => {
+    const div = document.createElement('div');
+    div.textContent = item.label;
+    div.onclick = () => { menu.remove(); item.fn(); };
+    menu.appendChild(div);
+  });
+  const rect = event.currentTarget.getBoundingClientRect();
+  menu.style.cssText = `top:${rect.bottom+2}px;left:${rect.left}px`;
+  document.body.appendChild(menu);
+  setTimeout(() => document.addEventListener('click', () => menu.remove(), {once:true}), 0);
+}
+
+async function _ensureTriggerId(triggerId, pmId, triggerType) {
+  if (triggerId) return triggerId;
+  // Create root trigger first
+  const res = await fetch(`/api/pm/${pmId}/add-trigger`, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({trigger_type: triggerType}),
+  });
+  const d = await res.json();
+  if (d.error) { showToast('エラー: ' + d.error); return null; }
+  return d.trigger_id;
+}
+
+function doAddRun(triggerId, pmId, triggerType) {
+  showScenePicker('Run するシーンを選択', null, pmId, async (presetId) => {
+    if (presetId == null) return;
+    const tid = await _ensureTriggerId(triggerId, pmId, triggerType);
+    if (!tid) return;
+    const res = await fetch(`/api/trigger/${tid}/add-action`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({type: 'run', preset_id: presetId}),
+    });
+    const d = await res.json();
+    if (d.error) { showToast('エラー: ' + d.error); return; }
+    await reloadPrograms();
+  });
+}
+
+function doAddDelay(triggerId, pmId, triggerType) {
+  const overlay = document.createElement('div');
+  overlay.className = 'scene-picker-overlay';
+  overlay.id = 'delay-picker-overlay';
+  overlay.innerHTML = `
+    <div class="scene-picker-modal" onclick="event.stopPropagation()" style="max-width:300px">
+      <div class="scene-picker-header"><span>Delay を追加</span>
+        <button onclick="document.getElementById('delay-picker-overlay').remove()">✕</button></div>
+      <div style="padding:16px">
+        <div style="margin-bottom:8px;font-size:11px;color:var(--text-dim)">時間（最大4時間、1秒刻み）</div>
+        <div style="display:flex;gap:8px;align-items:center;font-size:12px">
+          <input id="dly-h" type="number" value="0" min="0" max="4"
+            style="width:52px;padding:4px;background:var(--surface2);color:var(--text);border:1px solid rgba(255,255,255,0.1);border-radius:4px;text-align:center"> h
+          <input id="dly-m" type="number" value="0" min="0" max="59"
+            style="width:52px;padding:4px;background:var(--surface2);color:var(--text);border:1px solid rgba(255,255,255,0.1);border-radius:4px;text-align:center"> m
+          <input id="dly-s" type="number" value="1" min="0" max="59"
+            style="width:52px;padding:4px;background:var(--surface2);color:var(--text);border:1px solid rgba(255,255,255,0.1);border-radius:4px;text-align:center"> s
+        </div>
+      </div>
+      <div class="scene-picker-footer">
+        <button class="btn btn-primary" style="font-size:11px;padding:4px 12px"
+          onclick="confirmAddDelay(${triggerId ?? 'null'},${pmId ?? 'null'},${triggerType ?? 'null'})">追加</button>
+        <button class="btn" style="font-size:11px;padding:4px 10px;background:var(--surface2);color:var(--text-dim)"
+          onclick="document.getElementById('delay-picker-overlay').remove()">キャンセル</button>
+      </div>
+    </div>`;
+  overlay.addEventListener('click', () => overlay.remove());
+  document.body.appendChild(overlay);
+}
+
+async function confirmAddDelay(triggerId, pmId, triggerType) {
+  const h = parseInt(document.getElementById('dly-h')?.value || 0);
+  const m = parseInt(document.getElementById('dly-m')?.value || 0);
+  const s = parseInt(document.getElementById('dly-s')?.value || 1);
+  const ms = Math.max(1000, Math.min((h*3600 + m*60 + s) * 1000, 14400000));
+  document.getElementById('delay-picker-overlay')?.remove();
+  const tid = await _ensureTriggerId(triggerId, pmId, triggerType);
+  if (!tid) return;
+  const res = await fetch(`/api/trigger/${tid}/add-action`, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({type: 'delay', delay_ms: ms}),
+  });
+  const d = await res.json();
+  if (d.error) { showToast('エラー: ' + d.error); return; }
+  await reloadPrograms();
+}
+
+async function doAddIf(triggerId, pmId, triggerType) {
+  const tid = await _ensureTriggerId(triggerId, pmId, triggerType);
+  if (!tid) return;
+  const res = await fetch(`/api/trigger/${tid}/add-action`, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({type: 'if'}),
+  });
+  const d = await res.json();
+  if (d.error) { showToast('エラー: ' + d.error); return; }
+  await reloadPrograms();
+  showToast('If条件を追加しました。条件をクリックして編集してください。');
+}
+
+async function addElseBranch(actionId) {
+  const res = await fetch(`/api/action/${actionId}/add-else`, {method: 'POST'});
+  const d = await res.json();
+  if (d.error) { showToast('エラー: ' + d.error); return; }
+  await reloadPrograms();
+}
+
+async function deleteAction(actionId) {
+  if (!confirm('このアクションを削除しますか？（If文の場合は中のアクションも削除されます）')) return;
+  const res = await fetch(`/api/action/${actionId}`, {method: 'DELETE'});
   const d = await res.json();
   if (d.error) { showToast('エラー: ' + d.error); return; }
   await reloadPrograms();

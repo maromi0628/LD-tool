@@ -77,6 +77,20 @@ def execute_sql(sql, params=()):
     state["dirty"] = True
 
 
+def execute_sql_insert(sql, params=()):
+    """Execute INSERT with OUTPUT INSERTED clause; return list of inserted rows."""
+    conn = sql_conn()
+    conn.autocommit = False
+    cur = conn.cursor()
+    cur.execute(f"USE [{state['db_name']}]")
+    cur.execute(sql, params)
+    rows = [dict(zip([col[0] for col in cur.description], row)) for row in cur.fetchall()]
+    conn.commit()
+    conn.close()
+    state["dirty"] = True
+    return rows
+
+
 def execute_sqls(statements):
     """Execute multiple DML statements in a single transaction."""
     conn = sql_conn()
@@ -1386,6 +1400,150 @@ def debug_area(area_id):
         "SELECT * FROM tblSwitchLeg WHERE ParentID = ?", (area_id,)
     )
     return jsonify({"zones": result, "orphaned_switchlegs": orphan_sls})
+
+
+# ── Program structure helpers ─────────────────
+
+def _next_sort_order_action(trigger_id):
+    rows = _try_q("SELECT COALESCE(MAX(SortOrder)+1, 0) AS nxt FROM tblAction WHERE ParentID = ?", (trigger_id,))
+    if rows and not rows[0].get("__error__") and rows[0]["nxt"] is not None:
+        return rows[0]["nxt"]
+    return 0
+
+
+def _delete_action_recursive(action_id):
+    """Delete an action + its evaluations + its sub-triggers (and their actions) recursively."""
+    sub_trigs = _try_q("SELECT TriggerID FROM tblTrigger WHERE ParentId = ?", (action_id,))
+    if sub_trigs and not sub_trigs[0].get("__error__"):
+        for t in sub_trigs:
+            _delete_trigger_recursive(t["TriggerID"])
+    execute_sql("DELETE FROM tblEvaluation WHERE ParentID = ? AND ParentType = 233", (action_id,))
+    execute_sql("DELETE FROM tblAction WHERE ActionID = ?", (action_id,))
+
+
+def _delete_trigger_recursive(trigger_id):
+    """Delete a trigger + all its actions recursively."""
+    acts = _try_q("SELECT ActionID FROM tblAction WHERE ParentID = ? AND ParentType = 232", (trigger_id,))
+    if acts and not acts[0].get("__error__"):
+        for a in acts:
+            _delete_action_recursive(a["ActionID"])
+    execute_sql("DELETE FROM tblTrigger WHERE TriggerID = ?", (trigger_id,))
+
+
+@app.route("/api/trigger/<int:trigger_id>/add-action", methods=["POST"])
+def add_action_to_trigger(trigger_id):
+    """Add a Run / Delay / If action to an existing trigger."""
+    if not state["db_name"]:
+        return jsonify({"error": "DB未接続"}), 400
+    data = request.json or {}
+    action_type = data.get("type")
+    sort = _next_sort_order_action(trigger_id)
+    try:
+        if action_type == "run":
+            preset_id = data.get("preset_id") or 0
+            rows = execute_sql_insert("""
+                INSERT INTO tblAction
+                    (ObjectType, DatabaseRevision, ParentID, ParentType, SortOrder,
+                     DelayTime, ExecutionType, PresetId, WhereUsedId)
+                OUTPUT INSERTED.ActionID
+                VALUES (234, 0, ?, 232, ?, 0, 1, ?, 2147483647)
+            """, (trigger_id, sort, preset_id))
+            return jsonify({"ok": True, "action_id": rows[0]["ActionID"]})
+
+        elif action_type == "delay":
+            delay_ms = max(1000, min(int(data.get("delay_ms", 1000)), 14400000))
+            rows = execute_sql_insert("""
+                INSERT INTO tblAction
+                    (ObjectType, DatabaseRevision, ParentID, ParentType, SortOrder,
+                     DelayTime, ExecutionType, PresetId, WhereUsedId)
+                OUTPUT INSERTED.ActionID
+                VALUES (235, 0, ?, 232, ?, ?, 0, 0, 2147483647)
+            """, (trigger_id, sort, delay_ms))
+            return jsonify({"ok": True, "action_id": rows[0]["ActionID"]})
+
+        elif action_type == "if":
+            # Conditional action
+            rows = execute_sql_insert("""
+                INSERT INTO tblAction
+                    (ObjectType, DatabaseRevision, ParentID, ParentType, SortOrder,
+                     DelayTime, ExecutionType, PresetId, WhereUsedId)
+                OUTPUT INSERTED.ActionID
+                VALUES (233, 0, ?, 232, ?, 0, 0, 0, 2147483647)
+            """, (trigger_id, sort))
+            action_id = rows[0]["ActionID"]
+            # Default evaluation: System Property DND Mode = 1
+            eval_rows = execute_sql_insert("""
+                INSERT INTO tblEvaluation
+                    (ObjectType, DatabaseRevision, ParentID, ParentType, SortOrder,
+                     EvaluationOperator, FirstOperandObjectID, FirstOperandObjectType,
+                     FirstOperandRefProperty, SecondOperand, ConditionType, ThirdOperand, WhereUsedId)
+                OUTPUT INSERTED.EvaluationID
+                VALUES (237, 0, ?, 233, 0, 3, 34, 400, 151, 1, 23, 0, 2147483647)
+            """, (action_id,))
+            eval_id = eval_rows[0]["EvaluationID"] if eval_rows else None
+            # Then branch trigger
+            execute_sql("""
+                INSERT INTO tblTrigger
+                    (ObjectType, ParentId, ParentType, DatabaseRevision, SortOrder, TriggerType, WhereUsedId)
+                VALUES (232, ?, 233, 0, 0, 5, 2147483647)
+            """, (action_id,))
+            return jsonify({"ok": True, "action_id": action_id, "eval_id": eval_id})
+
+        else:
+            return jsonify({"error": f"不明なtype: {action_type}"}), 400
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/action/<int:action_id>/add-else", methods=["POST"])
+def add_else_branch(action_id):
+    """Add an Else branch (TriggerType=6) to an existing conditional action."""
+    if not state["db_name"]:
+        return jsonify({"error": "DB未接続"}), 400
+    try:
+        execute_sql("""
+            INSERT INTO tblTrigger
+                (ObjectType, ParentId, ParentType, DatabaseRevision, SortOrder, TriggerType, WhereUsedId)
+            VALUES (232, ?, 233, 0, 1, 6, 2147483647)
+        """, (action_id,))
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/action/<int:action_id>", methods=["DELETE"])
+def delete_action_endpoint(action_id):
+    """Delete an action and all its children recursively."""
+    if not state["db_name"]:
+        return jsonify({"error": "DB未接続"}), 400
+    try:
+        _delete_action_recursive(action_id)
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/pm/<int:pm_id>/add-trigger", methods=["POST"])
+def add_root_trigger(pm_id):
+    """Add a root trigger to a PM (for event types that have no trigger yet)."""
+    if not state["db_name"]:
+        return jsonify({"error": "DB未接続"}), 400
+    data = request.json or {}
+    trigger_type = int(data.get("trigger_type", 1))
+    try:
+        rows = _try_q(
+            "SELECT COALESCE(MAX(SortOrder)+1,0) AS nxt FROM tblTrigger WHERE ParentId = ?", (pm_id,))
+        sort = rows[0]["nxt"] if rows and not rows[0].get("__error__") else 0
+        result = execute_sql_insert("""
+            INSERT INTO tblTrigger
+                (ObjectType, ParentId, ParentType, DatabaseRevision, SortOrder, TriggerType, WhereUsedId)
+            OUTPUT INSERTED.TriggerID
+            VALUES (232, ?, 231, 0, ?, ?, 2147483647)
+        """, (pm_id, sort, trigger_type))
+        return jsonify({"ok": True, "trigger_id": result[0]["TriggerID"]})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 # ── Program editing ───────────────────────────
