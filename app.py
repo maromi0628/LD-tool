@@ -1504,22 +1504,13 @@ def add_action_to_trigger(trigger_id):
                 "DelayTime": 0, "ExecutionType": 0, "PresetId": 0,
                 "WhereUsedId": 2147483647,
             })
-            # Default evaluation: System Property DND Mode = 1
-            eval_id = _alloc_and_insert("tblEvaluation", "EvaluationID", {
-                "ObjectType": 237, "DatabaseRevision": 0,
-                "ParentID": action_id, "ParentType": 233, "SortOrder": 0,
-                "EvaluationOperator": 3, "FirstOperandObjectID": 34,
-                "FirstOperandObjectType": 400, "FirstOperandRefProperty": 151,
-                "SecondOperand": 1, "ConditionType": 23, "ThirdOperand": 0,
-                "WhereUsedId": 2147483647,
-            })
-            # Then branch trigger
+            # Then branch trigger (no default evaluation — user selects condition via picker)
             _alloc_and_insert("tblTrigger", "TriggerID", {
                 "ObjectType": 232, "ParentId": action_id, "ParentType": 233,
                 "DatabaseRevision": 0, "SortOrder": 0, "TriggerType": 5,
                 "WhereUsedId": 2147483647,
             })
-            return jsonify({"ok": True, "action_id": action_id, "eval_id": eval_id})
+            return jsonify({"ok": True, "action_id": action_id})
 
         else:
             return jsonify({"error": f"不明なtype: {action_type}"}), 400
@@ -1560,6 +1551,36 @@ def add_condition_to_action(action_id):
             "WhereUsedId": 2147483647,
         })
         return jsonify({"ok": True, "connector_id": conn_id, "eval_id": eval_id})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/action/<int:action_id>/create-evaluation", methods=["POST"])
+def create_evaluation_for_action(action_id):
+    """Create the first condition row for an If action.
+    Time conditions use ObjectType=241, all others use ObjectType=237."""
+    if not state["db_name"]:
+        return jsonify({"error": "DB未接続"}), 400
+    data = request.json or {}
+    cond_type = int(data.get("ConditionType", 23))
+    # Time conditions (ConditionType=1) use ObjectType=241; others use 237
+    obj_type = int(data.get("ObjectType", 241 if cond_type == 1 else 237))
+    fobj_type = int(data.get("FirstOperandObjectType", 0))
+    fobj_id = int(data.get("FirstOperandObjectID") or 0)
+    fobj_ref = int(data.get("FirstOperandRefProperty") or 0)
+    op = int(data.get("EvaluationOperator", 9 if cond_type == 1 else 3))
+    second = int(data.get("SecondOperand", 0))
+    third = int(data.get("ThirdOperand") or 0)
+    try:
+        eval_id = _alloc_and_insert("tblEvaluation", "EvaluationID", {
+            "ObjectType": obj_type, "DatabaseRevision": 0,
+            "ParentID": action_id, "ParentType": 233, "SortOrder": 0,
+            "EvaluationOperator": op, "FirstOperandObjectID": fobj_id,
+            "FirstOperandObjectType": fobj_type, "FirstOperandRefProperty": fobj_ref,
+            "SecondOperand": second, "ConditionType": cond_type, "ThirdOperand": third,
+            "WhereUsedId": 2147483647,
+        })
+        return jsonify({"ok": True, "eval_id": eval_id})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -1693,7 +1714,8 @@ def update_evaluation(eval_id):
         return jsonify({"error": "DB未接続"}), 400
     data = request.json or {}
     allowed = {"FirstOperandObjectID", "SecondOperand", "FirstOperandRefProperty",
-               "EvaluationOperator", "ThirdOperand"}
+               "EvaluationOperator", "ThirdOperand", "ConditionType", "FirstOperandObjectType",
+               "ObjectType"}
     updates = {k: v for k, v in data.items() if k in allowed}
     if not updates:
         return jsonify({"error": "更新フィールドなし"}), 400

@@ -150,6 +150,17 @@
   /* AND/OR condition connector */
   .prog-connector { color: #c586c0; font-weight: 600; cursor: pointer; padding: 0 2px; border-radius: 2px; }
   .prog-connector:hover { background: rgba(197,134,192,0.2); }
+  /* Condition picker button */
+  .prog-cond-btn { cursor: pointer; border-radius: 3px; padding: 0 4px; border: 1px solid transparent; transition: border-color 0.12s, background 0.12s; }
+  .prog-cond-btn:hover { border-color: rgba(220,220,170,0.4); background: rgba(220,220,170,0.08); }
+  /* Condition picker dropdown menus */
+  .cond-picker-menu { position: fixed; z-index: 10000; background: var(--surface2); border: 1px solid var(--border); border-radius: 5px; padding: 3px 0; min-width: 190px; box-shadow: 0 4px 16px rgba(0,0,0,0.5); }
+  .cond-picker-menu.cond-sub-menu { max-height: 320px; overflow-y: auto; }
+  .cond-picker-menu .cpi { padding: 5px 14px; cursor: pointer; display: flex; align-items: center; justify-content: space-between; font-size: 12px; white-space: nowrap; }
+  .cond-picker-menu .cpi:hover { background: rgba(74,144,217,0.2); }
+  .cond-picker-menu .cpi.cpi-disabled { color: var(--text-dim); cursor: default; }
+  .cond-picker-menu .cpi.cpi-disabled:hover { background: none; }
+  .cond-picker-menu .cpi-arrow { color: var(--text-dim); font-size: 10px; margin-left: 8px; flex-shrink: 0; }
   /* Then ▾ dropdown */
   .prog-then-drop { cursor: pointer; border-radius: 2px; padding: 0 3px; }
   .prog-then-drop:hover { background: rgba(197,134,192,0.2); }
@@ -838,11 +849,15 @@ function switchEventTab(uid, tabKey) {
 // EvaluationOperator: 3=Equal, 4=NotEqual
 
 const SYSTEM_PROP_NAMES = {
-  149: 'Occupancy Mode',
+  149: 'Presence Status',
   150: 'Emergency Mode',
-  151: 'DND Mode',
-  152: 'System Mode 152',
+  151: 'Do Not Disturb',
+  152: 'Room State',
+  153: 'Make Up Room',
+  154: 'First Guest Entry',
+  155: 'Turndown Service',
   156: 'ADA Mode',
+  157: 'Automation',
 };
 
 function evalOpText(op) { return op === 4 ? 'is not' : 'is'; }
@@ -886,9 +901,11 @@ function buildSingleConditionText(cond, presetNames, pm) {
   return null;
 }
 
+const _condPickerData = {};
+
 function renderConditionsHtml(evals, presetNames, pm, actionId) {
   if (!evals || !evals.length) {
-    return `<span class="prog-condition prog-line-run" style="font-style:italic" onclick="editCondition(null)">(condition)</span>`;
+    return `<span class="prog-condition prog-cond-btn" onclick="event.stopPropagation();openCondPicker(event,null,${actionId})">Select a condition ▾</span>`;
   }
   const sorted = [...evals].sort((a, b) => (a.SortOrder ?? 0) - (b.SortOrder ?? 0));
   let html = '';
@@ -897,13 +914,10 @@ function renderConditionsHtml(evals, presetNames, pm, actionId) {
       const opText = e.EvaluationOperator === 2 ? 'Or' : 'and';
       html += ` <span class="prog-connector" onclick="event.stopPropagation();toggleConnector(${e.EvaluationID},this)" title="クリックでand/Or切替">${opText}</span> `;
     } else {
+      _condPickerData[e.EvaluationID] = e;
       const condText = buildSingleConditionText(e, presetNames, pm);
-      const condJson = JSON.stringify(e).replace(/"/g, '&quot;');
-      if (condText) {
-        html += `<span class="prog-condition prog-line-run" onclick="editCondition(${condJson})">${condText}<span class="prog-edit-hint">✎</span></span>`;
-      } else {
-        html += `<span class="prog-condition prog-line-run" style="font-style:italic" onclick="editCondition(${condJson})">(condition)<span class="prog-edit-hint">✎</span></span>`;
-      }
+      const label = condText || 'Select a condition';
+      html += `<span class="prog-condition prog-cond-btn" onclick="event.stopPropagation();openCondPicker(event,${e.EvaluationID},${actionId})">${label} ▾</span>`;
     }
   });
   return html;
@@ -1269,6 +1283,227 @@ async function loadLeds() {
   return _ledsCache;
 }
 
+// ── Condition picker (hierarchical 2-level menu) ──────────────
+let _condPickerMenus = [];  // [primary, submenu] DOM elements
+let _condSubTimer = null;
+
+function _closeCondPickerMenus() {
+  if (_condSubTimer) { clearTimeout(_condSubTimer); _condSubTimer = null; }
+  _condPickerMenus.forEach(m => m?.remove());
+  _condPickerMenus = [];
+}
+
+function _clearCondSubTimer() {
+  if (_condSubTimer) { clearTimeout(_condSubTimer); _condSubTimer = null; }
+}
+
+function _scheduleCondSubClose() {
+  _clearCondSubTimer();
+  _condSubTimer = setTimeout(() => {
+    _condPickerMenus[1]?.remove();
+    _condPickerMenus[1] = null;
+    _condSubTimer = null;
+  }, 150);
+}
+
+async function openCondPicker(event, evalId, actionId) {
+  event.stopPropagation();
+  _closeCondPickerMenus();
+  document.querySelectorAll('.add-action-menu').forEach(m => m.remove());
+
+  const currentCond = evalId ? (_condPickerData[evalId] || null) : null;
+
+  // Load data upfront (cached)
+  const [vars, leds] = await Promise.all([loadVariables(), loadLeds()]);
+
+  // Build category list — matches LD's menu structure
+  // typeFields: constants written to DB when creating a new condition of this type
+  // FirstOperandObjectType: 169=Variable, 107=LED, 400=SystemProperty
+  const sysProps = Object.entries(SYSTEM_PROP_NAMES).map(([id, name]) => ({
+    label: name, condType: 23,
+    typeData: { propId: parseInt(id) },
+    typeFields: { ConditionType: 23, FirstOperandObjectType: 400, FirstOperandObjectID: 34 },
+  }));
+
+  const categories = [
+    {
+      label: 'Variables',
+      items: vars.map(v => ({
+        label: v.Name, condType: 0,
+        typeData: { varId: v.VariableID },
+        typeFields: { ConditionType: 0, FirstOperandObjectType: 169, FirstOperandRefProperty: 42 },
+      })),
+    },
+    {
+      label: 'Time Period',
+      items: [
+        { label: 'Time of Day', condType: 1, typeData: {},
+          typeFields: { ConditionType: 1, ObjectTypeOverride: 241, EvaluationOperator: 9,
+                        FirstOperandObjectType: 1, FirstOperandObjectID: 2, FirstOperandRefProperty: 68 } },
+      ],
+    },
+    { label: 'Occupancy',            items: [], disabled: true },
+    { label: 'Contact Closure Inputs',  items: [], disabled: true },
+    { label: 'Contact Closure Outputs', items: [], disabled: true },
+    {
+      label: 'LED State',
+      items: leds.map(l => ({
+        label: `${l.StationName || l.DeviceName} — LED ${l.LedNumber}`,
+        condType: 5,
+        typeData: { ledId: l.LedID },
+        typeFields: { ConditionType: 5, FirstOperandObjectType: 107, FirstOperandRefProperty: 23 },
+      })),
+    },
+    { label: 'Lighting - Areas',  items: [], disabled: true },
+    { label: 'Lighting - Zones',  items: [], disabled: true },
+    { label: 'Timeclocks',        items: [], disabled: true },
+    { label: 'Sequences',         items: [], disabled: true },
+    { label: 'HVAC Zones',        items: [], disabled: true },
+    { label: 'Devices',           items: [], disabled: true },
+    { label: 'Room Properties',   items: sysProps },
+  ];
+
+  // Primary menu
+  const primary = document.createElement('div');
+  primary.className = 'cond-picker-menu';
+  primary.addEventListener('mouseenter', _clearCondSubTimer);
+  _condPickerMenus[0] = primary;
+
+  categories.forEach(cat => {
+    const el = document.createElement('div');
+    const hasItems = cat.items.length > 0;
+    el.className = 'cpi' + (cat.disabled ? ' cpi-disabled' : '');
+    el.innerHTML = `<span>${cat.label}</span>${hasItems ? '<span class="cpi-arrow">▶</span>' : ''}`;
+
+    if (!hasItems) {
+      primary.appendChild(el);
+      return;
+    }
+
+    el.addEventListener('mouseenter', () => {
+      _clearCondSubTimer();
+      // Remove any existing submenu
+      _condPickerMenus[1]?.remove();
+      _condPickerMenus[1] = null;
+
+      const sub = document.createElement('div');
+      sub.className = 'cond-picker-menu cond-sub-menu';
+      sub.addEventListener('mouseenter', _clearCondSubTimer);
+      sub.addEventListener('mouseleave', _scheduleCondSubClose);
+      _condPickerMenus[1] = sub;
+
+      cat.items.forEach(item => {
+        const sEl = document.createElement('div');
+        sEl.className = 'cpi';
+        const isSelected = currentCond && currentCond.ConditionType === item.condType &&
+          ((item.typeData.varId && currentCond.FirstOperandObjectID == item.typeData.varId) ||
+           (item.typeData.ledId && currentCond.FirstOperandObjectID == item.typeData.ledId) ||
+           (item.typeData.propId && currentCond.FirstOperandRefProperty == item.typeData.propId) ||
+           (item.condType === 1 && currentCond.ConditionType === 1));
+        sEl.innerHTML = `<span style="${isSelected ? 'color:var(--accent)' : ''}">${item.label}</span>`;
+        sEl.addEventListener('click', e => {
+          e.stopPropagation();
+          _closeCondPickerMenus();
+          openCondValueEditor(evalId, actionId, item.condType, item.typeData, item.typeFields, currentCond, vars, leds);
+        });
+        sub.appendChild(sEl);
+      });
+
+      // Position: right of primary, aligned to the hovered row
+      const prRect = primary.getBoundingClientRect();
+      const elRect = el.getBoundingClientRect();
+      // Clamp top so submenu stays within viewport
+      const vh = window.innerHeight;
+      const subH = Math.min(cat.items.length * 27 + 6, 320);
+      const top = Math.min(elRect.top, vh - subH - 8);
+      sub.style.cssText = `top:${top}px;left:${prRect.right + 2}px`;
+      document.body.appendChild(sub);
+    });
+
+    el.addEventListener('mouseleave', _scheduleCondSubClose);
+    primary.appendChild(el);
+  });
+
+  // Position primary menu near the clicked element
+  const rect = event.currentTarget?.getBoundingClientRect?.() || { bottom: event.clientY, left: event.clientX };
+  // Clamp so it doesn't go off-screen bottom
+  const vh = window.innerHeight;
+  const ph = categories.length * 27 + 6;
+  const top = Math.min(rect.bottom + 2, vh - ph - 8);
+  primary.style.cssText = `top:${top}px;left:${rect.left}px`;
+  document.body.appendChild(primary);
+
+  setTimeout(() => document.addEventListener('click', _closeCondPickerMenus, { once: true }), 0);
+}
+
+function openCondValueEditor(evalId, actionId, condType, typeData, typeFields, currentCond, vars, leds) {
+  // Build a condition object for the pickers (use existing if condType matches, else build default)
+  let cond;
+  if (currentCond && currentCond.ConditionType === condType) {
+    cond = currentCond;
+  } else {
+    cond = {
+      EvaluationID: evalId,
+      ConditionType: condType,
+      EvaluationOperator: condType === 1 ? 9 : 3,
+      FirstOperandObjectID: typeData.varId || typeData.ledId || typeFields.FirstOperandObjectID || null,
+      FirstOperandRefProperty: typeData.propId || typeFields.FirstOperandRefProperty || null,
+      SecondOperand: condType === 5 ? 1 : 0,
+      ThirdOperand: null,
+    };
+  }
+
+  let title, bodyHtml;
+  if (condType === 0) {
+    const adjustedCond = { ...cond, FirstOperandObjectID: typeData.varId ?? cond.FirstOperandObjectID };
+    title = 'Variable 条件';
+    bodyHtml = buildVariablePicker(vars, adjustedCond);
+  } else if (condType === 5) {
+    const adjustedCond = { ...cond, FirstOperandObjectID: typeData.ledId ?? cond.FirstOperandObjectID };
+    title = 'LED State 条件';
+    bodyHtml = buildLedPicker(leds, adjustedCond);
+  } else if (condType === 23) {
+    const adjustedCond = { ...cond, FirstOperandRefProperty: typeData.propId ?? cond.FirstOperandRefProperty };
+    title = 'Room Properties 条件';
+    bodyHtml = buildSysPropPicker(adjustedCond);
+  } else if (condType === 1) {
+    title = 'Time of Day 条件';
+    bodyHtml = buildTimePicker(cond);
+  } else {
+    showToast(`ConditionType ${condType} は未対応`);
+    return;
+  }
+
+  _showConditionModal(title, bodyHtml, async (data) => {
+    // Strip internal-only key before sending
+    const { ObjectTypeOverride, ...rest } = typeFields;
+    const payload = { ...rest, ...data };
+    if (ObjectTypeOverride) payload._objectType = ObjectTypeOverride;
+    await _saveOrCreateCondition(evalId, actionId, payload);
+  });
+}
+
+async function _saveOrCreateCondition(evalId, actionId, data) {
+  // _objectType is an internal hint for the correct tblEvaluation ObjectType
+  const { _objectType, ...payload } = data;
+  if (_objectType) payload.ObjectType = _objectType;
+  let res;
+  if (evalId != null) {
+    res = await fetch(`/api/evaluation/${evalId}`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  } else {
+    res = await fetch(`/api/action/${actionId}/create-evaluation`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  }
+  const d = await res.json();
+  if (d.error) { showToast('エラー: ' + d.error); return; }
+  await reloadPrograms();
+}
+
 async function editCondition(condJson) {
   let cond;
   try { cond = typeof condJson === 'string' ? JSON.parse(condJson) : condJson; } catch { cond = null; }
@@ -1277,24 +1512,20 @@ async function editCondition(condJson) {
   const ct = cond.ConditionType;
 
   if (ct === 0) {
-    // Variable state
     const vars = await loadVariables();
     _showConditionModal('Variable 条件を変更', buildVariablePicker(vars, cond), async (data) => {
       await _saveCondition(cond.EvaluationID, data);
     });
   } else if (ct === 5) {
-    // LED state
     const leds = await loadLeds();
     _showConditionModal('LED 条件を変更', buildLedPicker(leds, cond), async (data) => {
       await _saveCondition(cond.EvaluationID, data);
     });
   } else if (ct === 23) {
-    // System property
     _showConditionModal('System Property 条件を変更', buildSysPropPicker(cond), async (data) => {
       await _saveCondition(cond.EvaluationID, data);
     });
   } else if (ct === 1) {
-    // Time of Day
     _showConditionModal('Time of Day 条件を変更', buildTimePicker(cond), async (data) => {
       await _saveCondition(cond.EvaluationID, data);
     });
