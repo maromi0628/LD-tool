@@ -905,8 +905,8 @@ function renderActionList(actions, presetNames, depth, pm, parentTriggerId) {
 
     if (act.ObjectType === 235) {
       // Delay — show as hh:mm:ss
-      const ms = act.DelayTime || 0;
-      const h = Math.floor(ms/3600000), m = Math.floor((ms%3600000)/60000), s = Math.floor((ms%60000)/1000);
+      const secs = act.DelayTime || 0;  // DelayTime is in seconds
+      const h = Math.floor(secs/3600), m = Math.floor((secs%3600)/60), s = secs%60;
       const timeStr = `${h}h ${m}m ${s}s`;
       html += `<div class="prog-line" style="padding-left:${pad}px">
         <span class="prog-keyword">Delay</span> <span style="color:var(--text-dim)">${timeStr}</span>${delBtn}</div>`;

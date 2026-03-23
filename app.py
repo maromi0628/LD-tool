@@ -1474,7 +1474,7 @@ def add_action_to_trigger(trigger_id):
             action_id = _alloc_and_insert("tblAction", "ActionID", {
                 "ObjectType": 235, "DatabaseRevision": 0,
                 "ParentID": trigger_id, "ParentType": 232, "SortOrder": sort,
-                "DelayTime": delay_ms, "ExecutionType": 0, "PresetId": 0,
+                "DelayTime": delay_ms // 1000, "ExecutionType": 0, "PresetId": 0,
                 "WhereUsedId": 2147483647,
             })
             return jsonify({"ok": True, "action_id": action_id})
