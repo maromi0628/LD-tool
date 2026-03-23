@@ -1458,6 +1458,23 @@ def add_action_to_trigger(trigger_id):
     data = request.json or {}
     action_type = data.get("type")
     sort = _next_sort_order_action(trigger_id)
+
+    # Optional: insert before or after a specific action
+    insert_after_id = data.get("insert_after_action_id")
+    insert_before_id = data.get("insert_before_action_id")
+    if insert_after_id is not None or insert_before_id is not None:
+        ref_id = insert_after_id if insert_after_id is not None else insert_before_id
+        ref_rows = _try_q("SELECT SortOrder FROM tblAction WHERE ActionID = ?", (ref_id,))
+        if ref_rows and not ref_rows[0].get("__error__") and ref_rows[0].get("SortOrder") is not None:
+            ref_sort = ref_rows[0]["SortOrder"]
+            insert_sort = ref_sort + 1 if insert_after_id is not None else ref_sort
+            execute_sql(
+                "UPDATE tblAction SET SortOrder = SortOrder + 1 "
+                "WHERE ParentID = ? AND ParentType = 232 AND SortOrder >= ?",
+                (trigger_id, insert_sort)
+            )
+            sort = insert_sort
+
     try:
         if action_type == "run":
             preset_id = data.get("preset_id") or 0
@@ -1507,6 +1524,63 @@ def add_action_to_trigger(trigger_id):
         else:
             return jsonify({"error": f"不明なtype: {action_type}"}), 400
 
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/action/<int:action_id>/add-condition", methods=["POST"])
+def add_condition_to_action(action_id):
+    """Add an AND/OR condition (ObjectType=236 connector + ObjectType=237 condition) to an If action."""
+    if not state["db_name"]:
+        return jsonify({"error": "DB未接続"}), 400
+    data = request.json or {}
+    logical_op = int(data.get("logical_operator", 1))  # 1=AND, 2=OR
+    try:
+        rows = _try_q(
+            "SELECT COALESCE(MAX(SortOrder)+1, 1) AS nxt FROM tblEvaluation WHERE ParentID = ? AND ParentType = 233",
+            (action_id,)
+        )
+        next_sort = rows[0]["nxt"] if rows and not rows[0].get("__error__") else 1
+        # Logical connector row (ObjectType=236)
+        conn_id = _alloc_and_insert("tblEvaluation", "EvaluationID", {
+            "ObjectType": 236, "DatabaseRevision": 0,
+            "ParentID": action_id, "ParentType": 233, "SortOrder": next_sort,
+            "EvaluationOperator": logical_op,
+            "FirstOperandObjectID": 0, "FirstOperandObjectType": 0,
+            "FirstOperandRefProperty": 0, "SecondOperand": 0,
+            "ConditionType": 0, "ThirdOperand": 0, "WhereUsedId": 2147483647,
+        })
+        # New condition row (ObjectType=237) — default: DND Mode = 1
+        eval_id = _alloc_and_insert("tblEvaluation", "EvaluationID", {
+            "ObjectType": 237, "DatabaseRevision": 0,
+            "ParentID": action_id, "ParentType": 233, "SortOrder": next_sort + 1,
+            "EvaluationOperator": 3, "FirstOperandObjectID": 34,
+            "FirstOperandObjectType": 400, "FirstOperandRefProperty": 151,
+            "SecondOperand": 1, "ConditionType": 23, "ThirdOperand": 0,
+            "WhereUsedId": 2147483647,
+        })
+        return jsonify({"ok": True, "connector_id": conn_id, "eval_id": eval_id})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/trigger/<int:trigger_id>/reorder", methods=["PUT"])
+def reorder_trigger_actions(trigger_id):
+    """Reorder actions in a trigger by assigning new SortOrder values."""
+    if not state["db_name"]:
+        return jsonify({"error": "DB未接続"}), 400
+    data = request.json or {}
+    action_ids = data.get("action_ids_ordered", [])
+    if not action_ids:
+        return jsonify({"error": "action_ids_ordered 必須"}), 400
+    try:
+        stmts = [
+            ("UPDATE tblAction SET SortOrder = ? WHERE ActionID = ? AND ParentID = ? AND ParentType = 232",
+             (i, aid, trigger_id))
+            for i, aid in enumerate(action_ids)
+        ]
+        execute_sqls(stmts)
+        return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
