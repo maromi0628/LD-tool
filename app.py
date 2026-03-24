@@ -1016,7 +1016,7 @@ def zone_cross_table(zone_id):
 
 def _build_trigger_tree(trigger_rows, preset_ids, depth=0):
     """Recursively build trigger→action tree, collecting preset IDs along the way."""
-    if not trigger_rows or depth > 5:
+    if not trigger_rows or depth > 20:
         return []
 
     trig_ids = [r["TriggerID"] for r in trigger_rows]
@@ -1051,19 +1051,45 @@ def _build_trigger_tree(trigger_rows, preset_ids, depth=0):
         # Fetch tblEvaluation rows for these conditional actions
         eval_rows = _try_q(f"""
             SELECT e.*,
-                   v.Name   AS _var_name,
-                   vs.Name  AS _state_name,
+                   v.Name    AS _var_name,
+                   vs.Name   AS _state_name,
                    l.LedNumber AS _led_number,
-                   cs.Name  AS _led_station_name
+                   cs.Name   AS _led_station_name,
+                   COALESCE(z.Name, sc_cci.Name) AS _zone_name,
+                   a.Name    AS _area_name,
+                   og.Name   AS _occ_group_name,
+                   shg.Name  AS _shade_name,
+                   tc.Name   AS _tc_name,
+                   seq.Name  AS _seq_name,
+                   sst.Name  AS _step_name,
+                   cs18.Name AS _dev_station_name
             FROM tblEvaluation e
-            LEFT JOIN tblVariable            v   ON e.ConditionType = 0 AND e.FirstOperandObjectType = 169
-                                                 AND e.FirstOperandObjectID = v.VariableID
-            LEFT JOIN tblVariableState       vs  ON e.ConditionType = 0
-                                                 AND e.SecondOperand = vs.VariableStateID
-            LEFT JOIN tblLed                 l   ON e.ConditionType = 5 AND e.FirstOperandObjectType = 107
-                                                 AND e.FirstOperandObjectID = l.LedID
+            LEFT JOIN tblVariable            v    ON e.ConditionType = 0 AND e.FirstOperandObjectType = 169
+                                                  AND e.FirstOperandObjectID = v.VariableID
+            LEFT JOIN tblVariableState       vs   ON e.ConditionType = 0
+                                                  AND e.SecondOperand = vs.VariableStateID
+            LEFT JOIN tblLed                 l    ON e.ConditionType = 5 AND e.FirstOperandObjectType = 107
+                                                  AND e.FirstOperandObjectID = l.LedID
             LEFT JOIN tblControlStationDevice csd ON e.ConditionType = 5 AND l.ParentDeviceID = csd.ControlStationDeviceID
-            LEFT JOIN tblControlStation       cs  ON csd.ParentControlStationID = cs.ControlStationID
+            LEFT JOIN tblControlStation      cs   ON csd.ParentControlStationID = cs.ControlStationID
+            LEFT JOIN tblZone                z    ON e.ConditionType IN (4, 7, 14) AND e.FirstOperandObjectID = z.ZoneID
+            LEFT JOIN tblSensorConnection    sc_cci ON e.ConditionType = 3 AND e.FirstOperandObjectType = 66
+                                                  AND e.FirstOperandObjectID = sc_cci.SensorConnectionID
+            LEFT JOIN tblArea                a    ON e.ConditionType = 6 AND e.FirstOperandObjectType = 2
+                                                  AND e.FirstOperandObjectID = a.AreaID
+            LEFT JOIN tblOccupancyGroup      og   ON e.ConditionType = 2 AND e.FirstOperandObjectType = 38
+                                                  AND e.FirstOperandObjectID = og.OccupancyGroupID
+            LEFT JOIN tblShadeGroup          shg  ON e.ConditionType = 8 AND e.FirstOperandObjectType = 133
+                                                  AND e.FirstOperandObjectID = shg.ShadeGroupID
+            LEFT JOIN tblTimeClock           tc   ON e.ConditionType = 9 AND e.FirstOperandObjectType = 19
+                                                  AND e.FirstOperandObjectID = tc.TimeClockID
+            LEFT JOIN tblSequence            seq  ON e.ConditionType = 10 AND e.FirstOperandObjectType = 90
+                                                  AND e.FirstOperandObjectID = seq.SequenceID
+            LEFT JOIN tblSequenceStep        sst  ON e.ConditionType = 10
+                                                  AND e.SecondOperand = sst.SequenceStepID
+            LEFT JOIN tblControlStationDevice csd18 ON e.ConditionType = 18 AND e.FirstOperandObjectType = 5
+                                                  AND e.FirstOperandObjectID = csd18.ControlStationDeviceID
+            LEFT JOIN tblControlStation      cs18 ON csd18.ParentControlStationID = cs18.ControlStationID
             WHERE e.ParentID IN ({ph2}) AND e.ParentType = 233
             ORDER BY e.ParentID, e.SortOrder
         """, cond_action_ids)
@@ -1691,20 +1717,298 @@ def all_leds():
     rows = _try_q("""
         SELECT l.LedID, l.LedNumber, l.ParentDeviceID,
                csd.Name AS DeviceName,
-               cs.Name  AS StationName
+               cs.Name  AS StationName,
+               a.Name   AS AreaName,
+               pa.Name  AS ParentAreaName
         FROM tblLed l
         JOIN tblControlStationDevice csd ON csd.ControlStationDeviceID = l.ParentDeviceID
         JOIN tblControlStation       cs  ON cs.ControlStationID = csd.ParentControlStationID
-        ORDER BY cs.Name, l.LedNumber
+        LEFT JOIN tblArea             a  ON cs.ParentID = a.AreaID
+        LEFT JOIN tblArea            pa  ON a.ParentID = pa.AreaID
+        ORDER BY pa.Name, a.Name, cs.Name, l.LedNumber
     """)
     if not rows or rows[0].get("__error__"):
         rows = _try_q("""
             SELECT LedID, LedNumber, ParentDeviceID,
                    CAST(ParentDeviceID AS nvarchar(20)) AS DeviceName,
-                   CAST(ParentDeviceID AS nvarchar(20)) AS StationName
+                   CAST(ParentDeviceID AS nvarchar(20)) AS StationName,
+                   NULL AS AreaName, NULL AS ParentAreaName
             FROM tblLed ORDER BY ParentDeviceID, LedNumber
         """)
     return jsonify({"leds": rows or []})
+
+
+@app.route("/api/cond-data")
+def cond_data():
+    """Return all data needed for the condition picker (all categories)."""
+    if not state["db_name"]:
+        return jsonify({"error": "DB未接続"}), 400
+
+    errors = {}
+    def q(sql, params=None):
+        rows = _try_q(sql, params or ())
+        if not rows or rows[0].get("__error__"):
+            err = (rows[0].get("__error__") if rows else "empty")
+            errors[sql[:60].strip()] = err
+            return []
+        return [dict(r) for r in rows]
+
+    # Occupancy groups — linked to area via PIR sensors
+    occupancy = q("""
+        SELECT DISTINCT og.OccupancyGroupID, og.Name AS OGName,
+               a.AreaID, a.Name AS AreaName, pa.Name AS ParentAreaName
+        FROM tblOccupancyGroup og
+        CROSS JOIN (
+            SELECT DISTINCT cs.ParentID AS AreaID
+            FROM tblSensor s
+            JOIN tblControlStationDevice csd ON s.ParentID = csd.ControlStationDeviceID
+            JOIN tblControlStation cs ON csd.ParentControlStationID = cs.ControlStationID
+            WHERE s.ObjectType = 325
+        ) sa
+        JOIN tblArea a ON sa.AreaID = a.AreaID
+        LEFT JOIN tblArea pa ON a.ParentID = pa.AreaID
+        ORDER BY pa.Name, a.Name
+    """)
+
+    # CCI — contact inputs: tblSensorConnection (ObjectType=66) via tblEnclosureDevice
+    cci = q("""
+        SELECT sc.SensorConnectionID, sc.Name AS InputName,
+               e.EnclosureID, e.Name AS EnclosureName,
+               a.AreaID, a.Name AS AreaName, pa.Name AS ParentAreaName
+        FROM tblSensorConnection sc
+        JOIN tblEnclosureDevice ed ON sc.ParentDeviceID = ed.EnclosureDeviceID
+        JOIN tblEnclosure e ON ed.ParentEnclosureID = e.EnclosureID
+        LEFT JOIN tblArea a  ON e.ParentAreaID = a.AreaID
+        LEFT JOIN tblArea pa ON a.ParentID = pa.AreaID
+        WHERE sc.ObjectType = 66
+        ORDER BY pa.Name, a.Name, e.Name, sc.SortOrder
+    """)
+
+    # CCO zones — zones with SwitchLeg LoadType 25 (Maintained) or 26 (Pulsed)
+    cco = q("""
+        SELECT z.ZoneID, z.Name AS ZoneName,
+               a.AreaID, a.Name AS AreaName, pa.Name AS ParentAreaName
+        FROM tblZone z
+        JOIN tblSwitchLeg sl ON sl.SwitchLegID = z.ZoneID + 1
+        JOIN tblArea a  ON z.ParentID = a.AreaID
+        LEFT JOIN tblArea pa ON a.ParentID = pa.AreaID
+        WHERE sl.LoadType IN (25, 26)
+        ORDER BY pa.Name, a.Name, z.Name
+    """)
+
+    # Lighting areas — leaf-level areas (no children)
+    areas = q("""
+        SELECT a.AreaID, a.Name AS AreaName, pa.Name AS ParentAreaName
+        FROM tblArea a
+        LEFT JOIN tblArea pa ON a.ParentID = pa.AreaID
+        WHERE NOT EXISTS (SELECT 1 FROM tblArea c WHERE c.ParentID = a.AreaID)
+        ORDER BY pa.Name, a.Name
+    """)
+
+    # Lighting zones — ObjectType=15 zones excluding CCO (LoadType 25/26)
+    zones = q("""
+        SELECT z.ZoneID, z.Name AS ZoneName,
+               a.AreaID, a.Name AS AreaName, pa.Name AS ParentAreaName
+        FROM tblZone z
+        LEFT JOIN tblSwitchLeg sl ON sl.SwitchLegID = z.ZoneID + 1
+        JOIN tblArea a  ON z.ParentID = a.AreaID
+        LEFT JOIN tblArea pa ON a.ParentID = pa.AreaID
+        WHERE z.ObjectType = 15
+          AND (sl.LoadType IS NULL OR sl.LoadType NOT IN (25, 26))
+        ORDER BY pa.Name, a.Name, z.Name
+    """)
+
+    # Sequences
+    sequences = q("""
+        SELECT s.SequenceID, s.Name AS SequenceName,
+               a.AreaID, a.Name AS AreaName, pa.Name AS ParentAreaName
+        FROM tblSequence s
+        LEFT JOIN tblArea a  ON s.ParentID = a.AreaID AND s.ParentType = 2
+        LEFT JOIN tblArea pa ON a.ParentID = pa.AreaID
+        ORDER BY s.Name
+    """)
+
+    # Timeclocks with modes
+    timeclocks = q("""
+        SELECT tc.TimeClockID, tc.Name AS TimeclockName,
+               tm.TimeClockModeID, tm.Name AS ModeName, tm.SortOrder AS ModeSort
+        FROM tblTimeClock tc
+        LEFT JOIN tblTimeClockMode tm ON tm.ParentTimeclockID = tc.TimeClockID
+        ORDER BY tc.Name, tm.SortOrder
+    """)
+
+    # HVAC zones — via tblZoneHVAC (more reliable than ObjectType=211 filter)
+    hvac = q("""
+        SELECT z.ZoneID, z.Name AS ZoneName,
+               a.AreaID, a.Name AS AreaName, pa.Name AS ParentAreaName
+        FROM tblZoneHVAC hz
+        JOIN tblZone z ON hz.ZoneID = z.ZoneID
+        JOIN tblArea a  ON z.ParentID = a.AreaID
+        LEFT JOIN tblArea pa ON a.ParentID = pa.AreaID
+        ORDER BY pa.Name, a.Name, z.Name
+    """)
+    if not hvac:
+        hvac = q("""
+            SELECT z.ZoneID, z.Name AS ZoneName,
+                   a.AreaID, a.Name AS AreaName, pa.Name AS ParentAreaName
+            FROM tblZone z
+            JOIN tblArea a  ON z.ParentID = a.AreaID
+            LEFT JOIN tblArea pa ON a.ParentID = pa.AreaID
+            WHERE z.ObjectType = 211
+            ORDER BY pa.Name, a.Name, z.Name
+        """)
+
+    # Devices — control station devices (for lock state conditions, CT=18, FOT=5)
+    devices = q("""
+        SELECT csd.ControlStationDeviceID, cs.Name AS DeviceName,
+               a.AreaID, a.Name AS AreaName, pa.Name AS ParentAreaName
+        FROM tblControlStationDevice csd
+        JOIN tblControlStation cs ON csd.ParentControlStationID = cs.ControlStationID
+        LEFT JOIN tblArea a  ON cs.ParentID = a.AreaID
+        LEFT JOIN tblArea pa ON a.ParentID = pa.AreaID
+        ORDER BY pa.Name, a.Name, cs.Name
+    """)
+
+    return jsonify({
+        "occupancy": occupancy,
+        "cci": cci,
+        "cco": cco,
+        "areas": areas,
+        "zones": zones,
+        "sequences": sequences,
+        "timeclocks": timeclocks,
+        "hvac": hvac,
+        "devices": devices,
+        "_errors": errors if errors else None,
+    })
+
+
+@app.route("/api/cond-debug")
+def cond_debug():
+    """Diagnostic: inspect DB to understand available condition data."""
+    if not state["db_name"]:
+        return jsonify({"error": "DB未接続"}), 400
+
+    def q(sql):
+        rows = _try_q(sql)
+        if not rows or (rows and rows[0].get("__error__")):
+            return []
+        return [dict(r) for r in rows]
+
+    return jsonify({
+        # What ConditionTypes are actually used in this program?
+        "eval_types": q("""
+            SELECT ConditionType, FirstOperandObjectType, COUNT(*) as cnt
+            FROM tblEvaluation WHERE ObjectType IN (237,241)
+            GROUP BY ConditionType, FirstOperandObjectType ORDER BY cnt DESC
+        """),
+        # HVAC zones via dedicated table
+        "hvac_zones": q("""
+            SELECT z.ZoneID, z.Name AS ZoneName, z.ObjectType,
+                   a.Name AS AreaName, pa.Name AS ParentAreaName
+            FROM tblZoneHVAC hz
+            JOIN tblZone z ON hz.ZoneID = z.ZoneID
+            JOIN tblArea a ON z.ParentID = a.AreaID
+            LEFT JOIN tblArea pa ON a.ParentID = pa.AreaID
+            ORDER BY pa.Name, a.Name, z.Name
+        """),
+        # Zone ObjectTypes distribution — to find CCI/CCO/HVAC patterns
+        "zone_object_types": q("""
+            SELECT z.ObjectType, COUNT(*) as cnt,
+                   MIN(z.Name) as sample_name
+            FROM tblZone z GROUP BY z.ObjectType ORDER BY cnt DESC
+        """),
+        # SwitchLeg LoadTypes — to find CCI/CCO patterns
+        "switchleg_loadtypes": q("""
+            SELECT sl.LoadType, lt.Description, COUNT(*) as cnt,
+                   MIN(z.Name) as sample_zone_name
+            FROM tblSwitchLeg sl
+            LEFT JOIN lstLoadType lt ON lt.LoadTypeID = sl.LoadType
+            LEFT JOIN tblZone z ON z.ZoneID = sl.ParentID
+            GROUP BY sl.LoadType, lt.Description ORDER BY sl.LoadType
+        """),
+        # Enclosures and their sub-tables (for CCI)
+        "enclosures": q("""
+            SELECT e.EnclosureID, e.Name AS EnclosureName,
+                   a.Name AS AreaName, pa.Name AS ParentAreaName
+            FROM tblEnclosure e
+            LEFT JOIN tblArea a ON e.ParentAreaID = a.AreaID
+            LEFT JOIN tblArea pa ON a.ParentID = pa.AreaID
+        """),
+        # CCI conditions from existing evaluations
+        "cci_evals": q("""
+            SELECT e.EvaluationID, e.ConditionType, e.FirstOperandObjectType,
+                   e.FirstOperandObjectID, e.FirstOperandRefProperty,
+                   e.EvaluationOperator, e.SecondOperand
+            FROM tblEvaluation e
+            WHERE e.ObjectType IN (237,241)
+              AND e.ConditionType NOT IN (0,1,2,3,5,6,7,8,9,10,14,18,23)
+        """),
+        # CCO switchlegs (LoadType 25=Maintained, 26=Pulsed)
+        "cco_switchlegs": q("""
+            SELECT sl.SwitchLegID, sl.Name AS SwitchLegName, sl.ParentID,
+                   sl.LoadType, lt.Description AS LoadTypeDesc,
+                   a.AreaID, a.Name AS AreaName, pa.Name AS ParentAreaName
+            FROM tblSwitchLeg sl
+            LEFT JOIN lstLoadType lt ON lt.LoadTypeID = sl.LoadType
+            LEFT JOIN tblArea a ON sl.ParentID = a.AreaID
+            LEFT JOIN tblArea pa ON a.ParentID = pa.AreaID
+            WHERE sl.LoadType IN (25, 26)
+            ORDER BY pa.Name, a.Name, sl.Name
+        """),
+        # All ObjectType=15 zones with their SwitchLeg LoadType (to distinguish CCI vs lighting)
+        "cci_zone_detail": q("""
+            SELECT z.ZoneID, z.Name AS ZoneName, z.ObjectType, z.ParentID AS AreaID,
+                   sl.SwitchLegID, sl.LoadType, sl.Name AS SlName,
+                   lt.Description AS LoadTypeDesc
+            FROM tblZone z
+            LEFT JOIN tblSwitchLeg sl ON sl.SwitchLegID = z.ZoneID + 1
+            LEFT JOIN lstLoadType lt ON lt.LoadTypeID = sl.LoadType
+            WHERE z.ObjectType = 15
+            ORDER BY z.ZoneID
+        """),
+        # Tables related to contact closure / enclosure inputs
+        "contact_tables": q("""
+            SELECT name FROM sys.tables
+            WHERE name LIKE '%Contact%' OR name LIKE '%Enclosure%'
+               OR name LIKE '%Input%' OR name LIKE '%CCI%'
+            ORDER BY name
+        """),
+        # All DB tables
+        "all_tables": q("SELECT name FROM sys.tables ORDER BY name"),
+        # All zone ObjectTypes
+        "all_zone_types": q("""
+            SELECT z.ObjectType, COUNT(*) as cnt, MIN(z.Name) as sample
+            FROM tblZone z GROUP BY z.ObjectType ORDER BY z.ObjectType
+        """),
+        # Zones in areas that contain QSE-IO enclosures (all ObjectTypes)
+        "qseio_area_zones": q("""
+            SELECT z.ZoneID, z.Name AS ZoneName, z.ObjectType,
+                   sl.LoadType, lt.Description AS LoadTypeDesc,
+                   a.Name AS AreaName
+            FROM tblZone z
+            LEFT JOIN tblSwitchLeg sl ON sl.SwitchLegID = z.ZoneID + 1
+            LEFT JOIN lstLoadType lt ON lt.LoadTypeID = sl.LoadType
+            JOIN tblArea a ON z.ParentID = a.AreaID
+            WHERE EXISTS (
+                SELECT 1 FROM tblEnclosure e
+                WHERE e.ParentAreaID = a.AreaID
+                  AND (e.Name LIKE '%QSE%' OR e.Name LIKE '%IO%')
+            )
+            ORDER BY a.Name, z.Name
+        """),
+        # All SensorConnections (full schema + data)
+        "cci_sensor_connections": q("SELECT TOP 10 * FROM tblSensorConnection"),
+        # SensorConnections linked to doors
+        "door_sensor_connections": q("""
+            SELECT d.DoorID, d.Name AS DoorName, d.ParentID AS DoorAreaID,
+                   d.AssociatedCCISensorConnectionID,
+                   sc.Name AS ScName, sc.ObjectType AS ScObjectType
+            FROM tblDoor d
+            LEFT JOIN tblSensorConnection sc
+                   ON sc.SensorConnectionID = d.AssociatedCCISensorConnectionID
+        """),
+    })
 
 
 @app.route("/api/evaluation/<int:eval_id>", methods=["PUT"])

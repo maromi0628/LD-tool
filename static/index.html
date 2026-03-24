@@ -160,6 +160,7 @@
   .cond-picker-menu .cpi:hover { background: rgba(74,144,217,0.2); }
   .cond-picker-menu .cpi.cpi-disabled { color: var(--text-dim); cursor: default; }
   .cond-picker-menu .cpi.cpi-disabled:hover { background: none; }
+  .cond-picker-menu .cpi.cpi-unknown { color: var(--text-dim); font-style: italic; }
   .cond-picker-menu .cpi-arrow { color: var(--text-dim); font-size: 10px; margin-left: 8px; flex-shrink: 0; }
   /* Then ▾ dropdown */
   .prog-then-drop { cursor: pointer; border-radius: 2px; padding: 0 3px; }
@@ -332,6 +333,8 @@ async function openFile(mode) {
   isPl = data.is_pl;
   document.getElementById('save-btn').disabled = !isPl;
   fsTemplates = data.templates || [];
+  // Reset all caches when a new file is loaded
+  _variablesCache = null; _ledsCache = null; _condDataCache = null;
   await loadOverview();
   updateTemplateBar(data.active_template);
   await loadTree();
@@ -845,8 +848,8 @@ function switchEventTab(uid, tabKey) {
 
 // ── Condition text builder ────────────────────
 // Condition data comes from tblEvaluation rows attached as act.evaluations.
-// ConditionType: 0=Variable, 5=LED, 23=SystemProperty, 1=Time
-// EvaluationOperator: 3=Equal, 4=NotEqual
+// ConditionType: 0=Variable, 1=Time/DoW/MoY, 2=OccScene, 3=CCO, 4=ZoneBinary, 5=LED, 6=AreaOccupancy, 7=ZoneLevel, 23=SystemProperty
+// EvaluationOperator: 3=Equal, 4=NotEqual, 9=IsFrom, 10=IsNotFrom
 
 const SYSTEM_PROP_NAMES = {
   149: 'Presence Status',
@@ -859,6 +862,11 @@ const SYSTEM_PROP_NAMES = {
   156: 'ADA Mode',
   157: 'Automation',
 };
+
+const _DOW_NAMES = {1:'Mon',2:'Tue',3:'Wed',4:'Thu',5:'Fri',6:'Sat',7:'Sun'};
+const _MON_NAMES = {1:'Jan',2:'Feb',3:'Mar',4:'Apr',5:'May',6:'Jun',7:'Jul',8:'Aug',9:'Sep',10:'Oct',11:'Nov',12:'Dec'};
+function _dowName(v) { const d = ((v - 1) % 7) + 1; return _DOW_NAMES[d] || `Day:${v}`; }
+function _monName(v) { return _MON_NAMES[v] || `Month:${v}`; }
 
 function evalOpText(op) { return op === 4 ? 'is not' : 'is'; }
 
@@ -896,9 +904,48 @@ function buildSingleConditionText(cond, presetNames, pm) {
     const propName = SYSTEM_PROP_NAMES[cond.FirstOperandRefProperty] || `Prop:${cond.FirstOperandRefProperty}`;
     return `${propName} ${op} ${cond.SecondOperand}`;
   } else if (cond.ConditionType === 1) {
-    return `Time of Day is from ${decodeLutronTime(cond.SecondOperand)} to ${decodeLutronTime(cond.ThirdOperand)}`;
+    const prop = cond.FirstOperandRefProperty;
+    if (prop === 53) {
+      return `Day of Week from ${_dowName(cond.SecondOperand)} to ${_dowName(cond.ThirdOperand)}`;
+    } else if (prop === 54) {
+      return `Month of Year from ${_monName(cond.SecondOperand)} to ${_monName(cond.ThirdOperand)}`;
+    }
+    return `Time of Day from ${decodeLutronTime(cond.SecondOperand)} to ${decodeLutronTime(cond.ThirdOperand)}`;
+  } else if (cond.ConditionType === 2) {
+    const name = cond._occ_group_name || `OccGroup:${cond.FirstOperandObjectID}`;
+    return `${name} ${op} scene ${cond.SecondOperand}`;
+  } else if (cond.ConditionType === 3) {
+    const name = cond._zone_name || `Zone:${cond.FirstOperandObjectID}`;
+    return `${name} ${op} ${cond.SecondOperand === 0 ? 'Open' : 'Closed'}`;
+  } else if (cond.ConditionType === 4) {
+    const name = cond._zone_name || `Zone:${cond.FirstOperandObjectID}`;
+    return `${name} ${op} ${cond.SecondOperand === 0 ? 'Open' : 'Closed'}`;
+  } else if (cond.ConditionType === 6) {
+    const name = cond._area_name || `Area:${cond.FirstOperandObjectID}`;
+    return `${name} ${op} Occupied`;
+  } else if (cond.ConditionType === 7) {
+    const name = cond._zone_name || `Zone:${cond.FirstOperandObjectID}`;
+    return `${name} level from ${cond.SecondOperand} to ${cond.ThirdOperand}`;
+  } else if (cond.ConditionType === 8) {
+    const name = cond._shade_name || `Shade:${cond.FirstOperandObjectID}`;
+    return `${name} ${op} Open`;
+  } else if (cond.ConditionType === 9) {
+    const name = cond._tc_name || `Timeclock:${cond.FirstOperandObjectID}`;
+    return `${name} ${op} Enabled`;
+  } else if (cond.ConditionType === 10) {
+    const seqName = cond._seq_name || `Seq:${cond.FirstOperandObjectID}`;
+    const stepName = cond._step_name || `Step:${cond.SecondOperand}`;
+    return `${seqName} ${op} ${stepName}`;
+  } else if (cond.ConditionType === 14) {
+    const name = cond._zone_name || `HVAC:${cond.FirstOperandObjectID}`;
+    const fromC = ((cond.SecondOperand / 10 - 32) * 5 / 9).toFixed(0);
+    const toC = ((cond.ThirdOperand / 10 - 32) * 5 / 9).toFixed(0);
+    return `${name} temp from ${fromC}°C to ${toC}°C`;
+  } else if (cond.ConditionType === 18) {
+    const name = cond._dev_station_name || `Device:${cond.FirstOperandObjectID}`;
+    return `${name} Lock State ${op} ${cond.SecondOperand === 2 ? 'Locked' : 'Unlocked'}`;
   }
-  return null;
+  return `CT:${cond.ConditionType} OT:${cond.FirstOperandObjectType} ID:${cond.FirstOperandObjectID}`;
 }
 
 const _condPickerData = {};
@@ -1266,6 +1313,7 @@ async function editPmBool(pmId, field, checked) {
 // ── Condition editing ──────────────────────────
 let _variablesCache = null;
 let _ledsCache = null;
+// _condDataCache and _condPickerMenus/timer are declared near openCondPicker
 
 async function loadVariables() {
   if (!_variablesCache) {
@@ -1281,6 +1329,15 @@ async function loadLeds() {
     _ledsCache = (await r.json()).leds || [];
   }
   return _ledsCache;
+}
+
+let _condDataCache = null;
+async function loadCondData() {
+  if (!_condDataCache) {
+    const r = await fetch('/api/cond-data');
+    _condDataCache = await r.json();
+  }
+  return _condDataCache;
 }
 
 // ── Condition picker (hierarchical 2-level menu) ──────────────
@@ -1306,6 +1363,16 @@ function _scheduleCondSubClose() {
   }, 150);
 }
 
+// areaLabel: "ParentArea ▶ Area" or just "Area" if no parent
+function _areaLabel(areaName, parentAreaName) {
+  return parentAreaName ? `${parentAreaName} ▶ ${areaName}` : (areaName || '');
+}
+
+// Build category items with unknown ConditionType — show but can't save
+function _unknownItem(label, typeData) {
+  return { label, condType: -1, typeData, typeFields: {}, unknownType: true };
+}
+
 async function openCondPicker(event, evalId, actionId) {
   event.stopPropagation();
   _closeCondPickerMenus();
@@ -1313,17 +1380,26 @@ async function openCondPicker(event, evalId, actionId) {
 
   const currentCond = evalId ? (_condPickerData[evalId] || null) : null;
 
-  // Load data upfront (cached)
-  const [vars, leds] = await Promise.all([loadVariables(), loadLeds()]);
+  // Load all data upfront (all cached after first call)
+  const [vars, leds, cd] = await Promise.all([loadVariables(), loadLeds(), loadCondData()]);
 
-  // Build category list — matches LD's menu structure
-  // typeFields: constants written to DB when creating a new condition of this type
-  // FirstOperandObjectType: 169=Variable, 107=LED, 400=SystemProperty
   const sysProps = Object.entries(SYSTEM_PROP_NAMES).map(([id, name]) => ({
     label: name, condType: 23,
     typeData: { propId: parseInt(id) },
     typeFields: { ConditionType: 23, FirstOperandObjectType: 400, FirstOperandObjectID: 34 },
   }));
+
+  // LED items grouped by Area ▶ Device
+  const ledItems = leds.map(l => {
+    const area = _areaLabel(l.AreaName, l.ParentAreaName);
+    const label = area ? `${area} ▶ ${l.StationName || l.DeviceName} — LED ${l.LedNumber}`
+                       : `${l.StationName || l.DeviceName} — LED ${l.LedNumber}`;
+    return {
+      label, condType: 5,
+      typeData: { ledId: l.LedID },
+      typeFields: { ConditionType: 5, FirstOperandObjectType: 107, FirstOperandRefProperty: 23 },
+    };
+  });
 
   const categories = [
     {
@@ -1342,47 +1418,105 @@ async function openCondPicker(event, evalId, actionId) {
                         FirstOperandObjectType: 1, FirstOperandObjectID: 2, FirstOperandRefProperty: 68 } },
       ],
     },
-    { label: 'Occupancy',            items: [], disabled: true },
-    { label: 'Contact Closure Inputs',  items: [], disabled: true },
-    { label: 'Contact Closure Outputs', items: [], disabled: true },
     {
-      label: 'LED State',
-      items: leds.map(l => ({
-        label: `${l.StationName || l.DeviceName} — LED ${l.LedNumber}`,
-        condType: 5,
-        typeData: { ledId: l.LedID },
-        typeFields: { ConditionType: 5, FirstOperandObjectType: 107, FirstOperandRefProperty: 23 },
+      label: 'Occupancy',
+      items: (cd.occupancy || []).map(r => ({
+        label: r.OGName || _areaLabel(r.AreaName, r.ParentAreaName),
+        condType: 2,
+        typeData: { occupancyGroupId: r.OccupancyGroupID },
+        typeFields: { ConditionType: 2, FirstOperandObjectType: 38, FirstOperandObjectID: r.OccupancyGroupID },
       })),
     },
-    { label: 'Lighting - Areas',  items: [], disabled: true },
-    { label: 'Lighting - Zones',  items: [], disabled: true },
-    { label: 'Timeclocks',        items: [], disabled: true },
-    { label: 'Sequences',         items: [], disabled: true },
-    { label: 'HVAC Zones',        items: [], disabled: true },
-    { label: 'Devices',           items: [], disabled: true },
-    { label: 'Room Properties',   items: sysProps },
+    {
+      label: 'Contact Closure Inputs',
+      items: (cd.cci || []).map(r => ({
+        label: `${_areaLabel(r.AreaName, r.ParentAreaName)} ▶ ${r.EnclosureName} ▶ ${r.InputName}`,
+        condType: 3,
+        typeData: { zoneId: r.SensorConnectionID },
+        typeFields: { ConditionType: 3, FirstOperandObjectType: 66, FirstOperandObjectID: r.SensorConnectionID },
+      })),
+    },
+    {
+      label: 'Contact Closure Outputs',
+      items: (cd.cco || []).map(r => ({
+        label: `${_areaLabel(r.AreaName, r.ParentAreaName)} ▶ ${r.ZoneName}`,
+        condType: 4,
+        typeData: { zoneId: r.ZoneID },
+        typeFields: { ConditionType: 4, FirstOperandObjectType: 15, FirstOperandObjectID: r.ZoneID },
+      })),
+    },
+    { label: 'LED State', items: ledItems },
+    {
+      label: 'Lighting - Areas',
+      items: (cd.areas || []).map(r => ({
+        label: _areaLabel(r.AreaName, r.ParentAreaName),
+        condType: 6,
+        typeData: { areaId: r.AreaID },
+        typeFields: { ConditionType: 6, FirstOperandObjectType: 2, FirstOperandObjectID: r.AreaID },
+      })),
+    },
+    {
+      label: 'Lighting - Zones',
+      items: (cd.zones || []).map(r => ({
+        label: `${_areaLabel(r.AreaName, r.ParentAreaName)} ▶ ${r.ZoneName}`,
+        condType: 7,
+        typeData: { zoneId: r.ZoneID },
+        typeFields: { ConditionType: 7, FirstOperandObjectType: 15, FirstOperandObjectID: r.ZoneID },
+      })),
+    },
+    {
+      label: 'Timeclocks',
+      items: (cd.timeclocks || []).map(r => ({
+        label: r.ModeName ? `${r.TimeclockName} / ${r.ModeName}` : r.TimeclockName,
+        condType: 9,
+        typeData: { timeclockId: r.TimeClockID, modeId: r.TimeClockModeID },
+        typeFields: { ConditionType: 9, FirstOperandObjectType: 19, FirstOperandObjectID: r.TimeClockID, SecondOperand: r.TimeClockModeID || 0 },
+      })),
+    },
+    {
+      label: 'Sequences',
+      items: (cd.sequences || []).map(r => ({
+        label: r.SequenceName,
+        condType: 10,
+        typeData: { sequenceId: r.SequenceID },
+        typeFields: { ConditionType: 10, FirstOperandObjectType: 90, FirstOperandObjectID: r.SequenceID },
+      })),
+    },
+    {
+      label: 'HVAC Zones',
+      items: (cd.hvac || []).map(r => ({
+        label: `${_areaLabel(r.AreaName, r.ParentAreaName)} ▶ ${r.ZoneName}`,
+        condType: 14,
+        typeData: { zoneId: r.ZoneID },
+        typeFields: { ConditionType: 14, FirstOperandObjectType: 211, FirstOperandObjectID: r.ZoneID },
+      })),
+    },
+    {
+      label: 'Devices',
+      items: (cd.devices || []).map(r => ({
+        label: `${_areaLabel(r.AreaName, r.ParentAreaName)} ▶ ${r.DeviceName}`,
+        condType: 18,
+        typeData: { deviceId: r.ControlStationDeviceID },
+        typeFields: { ConditionType: 18, FirstOperandObjectType: 5, FirstOperandObjectID: r.ControlStationDeviceID },
+      })),
+    },
+    { label: 'Room Properties', items: sysProps },
   ];
 
-  // Primary menu
+  // Build the primary menu
   const primary = document.createElement('div');
   primary.className = 'cond-picker-menu';
   primary.addEventListener('mouseenter', _clearCondSubTimer);
   _condPickerMenus[0] = primary;
 
   categories.forEach(cat => {
-    const el = document.createElement('div');
     const hasItems = cat.items.length > 0;
-    el.className = 'cpi' + (cat.disabled ? ' cpi-disabled' : '');
-    el.innerHTML = `<span>${cat.label}</span>${hasItems ? '<span class="cpi-arrow">▶</span>' : ''}`;
-
-    if (!hasItems) {
-      primary.appendChild(el);
-      return;
-    }
+    const el = document.createElement('div');
+    el.className = 'cpi';
+    el.innerHTML = `<span>${cat.label}</span><span class="cpi-arrow">▶</span>`;
 
     el.addEventListener('mouseenter', () => {
       _clearCondSubTimer();
-      // Remove any existing submenu
       _condPickerMenus[1]?.remove();
       _condPickerMenus[1] = null;
 
@@ -1392,27 +1526,44 @@ async function openCondPicker(event, evalId, actionId) {
       sub.addEventListener('mouseleave', _scheduleCondSubClose);
       _condPickerMenus[1] = sub;
 
+      if (!hasItems) {
+        const empty = document.createElement('div');
+        empty.className = 'cpi cpi-disabled';
+        empty.innerHTML = '<span style="font-style:italic">データなし</span>';
+        sub.appendChild(empty);
+      }
+
       cat.items.forEach(item => {
         const sEl = document.createElement('div');
-        sEl.className = 'cpi';
-        const isSelected = currentCond && currentCond.ConditionType === item.condType &&
+        sEl.className = 'cpi' + (item.unknownType ? ' cpi-unknown' : '');
+        const isSelected = !item.unknownType && currentCond &&
+          currentCond.ConditionType === item.condType &&
           ((item.typeData.varId && currentCond.FirstOperandObjectID == item.typeData.varId) ||
            (item.typeData.ledId && currentCond.FirstOperandObjectID == item.typeData.ledId) ||
            (item.typeData.propId && currentCond.FirstOperandRefProperty == item.typeData.propId) ||
-           (item.condType === 1 && currentCond.ConditionType === 1));
+           (item.condType === 1 && currentCond.ConditionType === 1) ||
+           (item.typeData.zoneId && currentCond.FirstOperandObjectID == item.typeData.zoneId) ||
+           (item.typeData.areaId && currentCond.FirstOperandObjectID == item.typeData.areaId) ||
+           (item.typeData.occupancyGroupId && currentCond.FirstOperandObjectID == item.typeData.occupancyGroupId) ||
+           (item.typeData.timeclockId && currentCond.FirstOperandObjectID == item.typeData.timeclockId) ||
+           (item.typeData.sequenceId && currentCond.FirstOperandObjectID == item.typeData.sequenceId) ||
+           (item.typeData.deviceId && currentCond.FirstOperandObjectID == item.typeData.deviceId));
         sEl.innerHTML = `<span style="${isSelected ? 'color:var(--accent)' : ''}">${item.label}</span>`;
         sEl.addEventListener('click', e => {
           e.stopPropagation();
           _closeCondPickerMenus();
+          if (item.unknownType) {
+            showToast('このConditionTypeはまだ未対応です（DB上のConditionTypeが不明）');
+            return;
+          }
           openCondValueEditor(evalId, actionId, item.condType, item.typeData, item.typeFields, currentCond, vars, leds);
         });
         sub.appendChild(sEl);
       });
 
-      // Position: right of primary, aligned to the hovered row
+      // Position right of primary, clamped to viewport
       const prRect = primary.getBoundingClientRect();
       const elRect = el.getBoundingClientRect();
-      // Clamp top so submenu stays within viewport
       const vh = window.innerHeight;
       const subH = Math.min(cat.items.length * 27 + 6, 320);
       const top = Math.min(elRect.top, vh - subH - 8);
@@ -1424,9 +1575,8 @@ async function openCondPicker(event, evalId, actionId) {
     primary.appendChild(el);
   });
 
-  // Position primary menu near the clicked element
+  // Position primary menu, clamped to viewport
   const rect = event.currentTarget?.getBoundingClientRect?.() || { bottom: event.clientY, left: event.clientX };
-  // Clamp so it doesn't go off-screen bottom
   const vh = window.innerHeight;
   const ph = categories.length * 27 + 6;
   const top = Math.min(rect.bottom + 2, vh - ph - 8);
@@ -1436,7 +1586,7 @@ async function openCondPicker(event, evalId, actionId) {
   setTimeout(() => document.addEventListener('click', _closeCondPickerMenus, { once: true }), 0);
 }
 
-function openCondValueEditor(evalId, actionId, condType, typeData, typeFields, currentCond, vars, leds) {
+async function openCondValueEditor(evalId, actionId, condType, typeData, typeFields, currentCond, vars, leds) {
   // Build a condition object for the pickers (use existing if condType matches, else build default)
   let cond;
   if (currentCond && currentCond.ConditionType === condType) {
@@ -1446,9 +1596,11 @@ function openCondValueEditor(evalId, actionId, condType, typeData, typeFields, c
       EvaluationID: evalId,
       ConditionType: condType,
       EvaluationOperator: condType === 1 ? 9 : 3,
-      FirstOperandObjectID: typeData.varId || typeData.ledId || typeFields.FirstOperandObjectID || null,
+      FirstOperandObjectID: typeData.varId || typeData.ledId || typeData.zoneId || typeData.areaId ||
+                            typeData.occupancyGroupId || typeData.timeclockId || typeData.sequenceId ||
+                            typeData.deviceId || typeFields.FirstOperandObjectID || null,
       FirstOperandRefProperty: typeData.propId || typeFields.FirstOperandRefProperty || null,
-      SecondOperand: condType === 5 ? 1 : 0,
+      SecondOperand: condType === 5 ? 1 : (typeFields.SecondOperand ?? 0),
       ThirdOperand: null,
     };
   }
@@ -1469,6 +1621,34 @@ function openCondValueEditor(evalId, actionId, condType, typeData, typeFields, c
   } else if (condType === 1) {
     title = 'Time of Day 条件';
     bodyHtml = buildTimePicker(cond);
+  } else if (condType === 2) {
+    title = 'Occupancy Group 条件';
+    bodyHtml = buildOccupancyGroupPicker(cond);
+  } else if (condType === 3) {
+    title = 'Contact Closure Output 条件';
+    bodyHtml = buildBinaryStatePicker(cond, 'Open', 'Closed', 0, 1);
+  } else if (condType === 6) {
+    title = 'Area Occupancy 条件';
+    bodyHtml = buildIsNotPicker(cond, 'Occupied');
+  } else if (condType === 7) {
+    title = 'Zone Level 条件';
+    bodyHtml = buildLevelRangePicker(cond);
+  } else if (condType === 8) {
+    title = 'Shade Group 条件';
+    bodyHtml = buildIsNotPicker(cond, 'Open');
+  } else if (condType === 9) {
+    title = 'Timeclock 条件';
+    bodyHtml = buildIsNotPicker(cond, 'Enabled');
+  } else if (condType === 10) {
+    const cd = await loadCondData();
+    title = 'Sequence 条件';
+    bodyHtml = buildSequenceStepPicker(cond, cd, typeData.sequenceId ?? cond.FirstOperandObjectID);
+  } else if (condType === 14) {
+    title = 'HVAC Zone 条件';
+    bodyHtml = buildHvacTempPicker(cond);
+  } else if (condType === 18) {
+    title = 'Device Lock State 条件';
+    bodyHtml = buildLockStatePicker(cond);
   } else {
     showToast(`ConditionType ${condType} は未対応`);
     return;
@@ -1527,6 +1707,43 @@ async function editCondition(condJson) {
     });
   } else if (ct === 1) {
     _showConditionModal('Time of Day 条件を変更', buildTimePicker(cond), async (data) => {
+      await _saveCondition(cond.EvaluationID, data);
+    });
+  } else if (ct === 2) {
+    _showConditionModal('Occupancy Group 条件を変更', buildOccupancyGroupPicker(cond), async (data) => {
+      await _saveCondition(cond.EvaluationID, data);
+    });
+  } else if (ct === 3) {
+    _showConditionModal('Contact Closure Output 条件を変更', buildBinaryStatePicker(cond, 'Open', 'Closed', 0, 1), async (data) => {
+      await _saveCondition(cond.EvaluationID, data);
+    });
+  } else if (ct === 6) {
+    _showConditionModal('Area Occupancy 条件を変更', buildIsNotPicker(cond, 'Occupied'), async (data) => {
+      await _saveCondition(cond.EvaluationID, data);
+    });
+  } else if (ct === 7) {
+    _showConditionModal('Zone Level 条件を変更', buildLevelRangePicker(cond), async (data) => {
+      await _saveCondition(cond.EvaluationID, data);
+    });
+  } else if (ct === 8) {
+    _showConditionModal('Shade Group 条件を変更', buildIsNotPicker(cond, 'Open'), async (data) => {
+      await _saveCondition(cond.EvaluationID, data);
+    });
+  } else if (ct === 9) {
+    _showConditionModal('Timeclock 条件を変更', buildIsNotPicker(cond, 'Enabled'), async (data) => {
+      await _saveCondition(cond.EvaluationID, data);
+    });
+  } else if (ct === 10) {
+    const cd = await loadCondData();
+    _showConditionModal('Sequence 条件を変更', buildSequenceStepPicker(cond, cd, cond.FirstOperandObjectID), async (data) => {
+      await _saveCondition(cond.EvaluationID, data);
+    });
+  } else if (ct === 14) {
+    _showConditionModal('HVAC Zone 条件を変更', buildHvacTempPicker(cond), async (data) => {
+      await _saveCondition(cond.EvaluationID, data);
+    });
+  } else if (ct === 18) {
+    _showConditionModal('Device Lock State 条件を変更', buildLockStatePicker(cond), async (data) => {
       await _saveCondition(cond.EvaluationID, data);
     });
   } else {
@@ -1653,6 +1870,98 @@ function buildTimePicker(cond) {
   </div>`;
 }
 
+function buildOccupancyGroupPicker(cond) {
+  const ss = `width:100%;padding:4px;background:var(--surface2);color:var(--text);border:1px solid rgba(255,255,255,0.1);border-radius:4px`;
+  const opSel = `<select id="cond-op" style="margin-bottom:10px;${ss}">
+    <option value="3" ${cond.EvaluationOperator===3?'selected':''}>is (Equal)</option>
+    <option value="4" ${cond.EvaluationOperator===4?'selected':''}>is not (NotEqual)</option>
+  </select>`;
+  return `<div>
+    <div style="margin-bottom:6px;font-size:11px;color:var(--text-dim)">演算子</div>${opSel}
+    <div style="margin-bottom:6px;font-size:11px;color:var(--text-dim)">Scene #</div>
+    <input id="cond-occ-scene" type="number" value="${cond.SecondOperand ?? 0}" min="0" max="255" style="${ss}">
+  </div>`;
+}
+
+function buildBinaryStatePicker(cond, label0, label1, val0, val1) {
+  const ss = `width:100%;padding:4px;background:var(--surface2);color:var(--text);border:1px solid rgba(255,255,255,0.1);border-radius:4px`;
+  const opSel = `<select id="cond-op" style="margin-bottom:10px;${ss}">
+    <option value="3" ${cond.EvaluationOperator===3?'selected':''}>is (Equal)</option>
+    <option value="4" ${cond.EvaluationOperator===4?'selected':''}>is not (NotEqual)</option>
+  </select>`;
+  const stateSel = `<select id="cond-binary-state" style="${ss}">
+    <option value="${val0}" ${cond.SecondOperand==val0?'selected':''}>${label0}</option>
+    <option value="${val1}" ${cond.SecondOperand==val1?'selected':''}>${label1}</option>
+  </select>`;
+  return `<div>
+    <div style="margin-bottom:6px;font-size:11px;color:var(--text-dim)">演算子</div>${opSel}
+    <div style="margin-bottom:6px;font-size:11px;color:var(--text-dim)">状態</div>${stateSel}
+  </div>`;
+}
+
+function buildIsNotPicker(cond, stateLabel) {
+  const ss = `width:100%;padding:4px;background:var(--surface2);color:var(--text);border:1px solid rgba(255,255,255,0.1);border-radius:4px`;
+  return `<div>
+    <div style="margin-bottom:6px;font-size:11px;color:var(--text-dim)">演算子</div>
+    <select id="cond-op" style="${ss}">
+      <option value="3" ${cond.EvaluationOperator===3?'selected':''}>is ${stateLabel}</option>
+      <option value="4" ${cond.EvaluationOperator===4?'selected':''}>is not ${stateLabel}</option>
+    </select>
+  </div>`;
+}
+
+function buildLevelRangePicker(cond) {
+  const ss = `width:100%;padding:4px;background:var(--surface2);color:var(--text);border:1px solid rgba(255,255,255,0.1);border-radius:4px`;
+  return `<div>
+    <div style="margin-bottom:6px;font-size:11px;color:var(--text-dim)">From (%)</div>
+    <input id="cond-level-from" type="number" value="${cond.SecondOperand ?? 0}" min="0" max="100" style="margin-bottom:10px;${ss}">
+    <div style="margin-bottom:6px;font-size:11px;color:var(--text-dim)">To (%)</div>
+    <input id="cond-level-to" type="number" value="${cond.ThirdOperand ?? 100}" min="0" max="100" style="${ss}">
+  </div>`;
+}
+
+function buildHvacTempPicker(cond) {
+  const ss = `width:100%;padding:4px;background:var(--surface2);color:var(--text);border:1px solid rgba(255,255,255,0.1);border-radius:4px`;
+  const fromC = cond.SecondOperand ? ((cond.SecondOperand / 10 - 32) * 5 / 9).toFixed(0) : 18;
+  const toC   = cond.ThirdOperand  ? ((cond.ThirdOperand  / 10 - 32) * 5 / 9).toFixed(0) : 26;
+  return `<div>
+    <div style="margin-bottom:6px;font-size:11px;color:var(--text-dim)">From (°C)</div>
+    <input id="cond-hvac-from" type="number" value="${fromC}" min="-10" max="50" style="margin-bottom:10px;${ss}">
+    <div style="margin-bottom:6px;font-size:11px;color:var(--text-dim)">To (°C)</div>
+    <input id="cond-hvac-to" type="number" value="${toC}" min="-10" max="50" style="${ss}">
+  </div>`;
+}
+
+function buildSequenceStepPicker(cond, cd, sequenceId) {
+  const ss = `width:100%;padding:4px;background:var(--surface2);color:var(--text);border:1px solid rgba(255,255,255,0.1);border-radius:4px`;
+  const opSel = `<select id="cond-op" style="margin-bottom:10px;${ss}">
+    <option value="3" ${cond.EvaluationOperator===3?'selected':''}>is (Equal)</option>
+    <option value="4" ${cond.EvaluationOperator===4?'selected':''}>is not (NotEqual)</option>
+  </select>`;
+  // Find steps for this sequence (sequences in cd don't include steps — use number input fallback)
+  return `<div>
+    <div style="margin-bottom:6px;font-size:11px;color:var(--text-dim)">演算子</div>${opSel}
+    <div style="margin-bottom:6px;font-size:11px;color:var(--text-dim)">Step ID</div>
+    <input id="cond-seq-step" type="number" value="${cond.SecondOperand ?? 0}" min="0" style="${ss}">
+  </div>`;
+}
+
+function buildLockStatePicker(cond) {
+  const ss = `width:100%;padding:4px;background:var(--surface2);color:var(--text);border:1px solid rgba(255,255,255,0.1);border-radius:4px`;
+  const opSel = `<select id="cond-op" style="margin-bottom:10px;${ss}">
+    <option value="3" ${cond.EvaluationOperator===3?'selected':''}>is (Equal)</option>
+    <option value="4" ${cond.EvaluationOperator===4?'selected':''}>is not (NotEqual)</option>
+  </select>`;
+  return `<div>
+    <div style="margin-bottom:6px;font-size:11px;color:var(--text-dim)">演算子</div>${opSel}
+    <div style="margin-bottom:6px;font-size:11px;color:var(--text-dim)">Lock State</div>
+    <select id="cond-lock-state" style="${ss}">
+      <option value="2" ${cond.SecondOperand===2?'selected':''}>Locked</option>
+      <option value="1" ${cond.SecondOperand===1?'selected':''}>Unlocked</option>
+    </select>
+  </div>`;
+}
+
 let _condSaveCallback = null;
 
 function _showConditionModal(title, bodyHtml, onSave) {
@@ -1708,6 +2017,27 @@ function saveConditionEdit() {
     data.SecondOperand = encodeLutronTime(parseInt(timFrom.value), fromOff);
     data.ThirdOperand  = encodeLutronTime(parseInt(timTo.value),   toOff);
   }
+  const occScene = document.getElementById('cond-occ-scene');
+  if (occScene) data.SecondOperand = parseInt(occScene.value);
+  const binState = document.getElementById('cond-binary-state');
+  if (binState) data.SecondOperand = parseInt(binState.value);
+  const levelFrom = document.getElementById('cond-level-from');
+  const levelTo   = document.getElementById('cond-level-to');
+  if (levelFrom && levelTo) {
+    data.SecondOperand = parseInt(levelFrom.value);
+    data.ThirdOperand  = parseInt(levelTo.value);
+  }
+  const hvacFrom = document.getElementById('cond-hvac-from');
+  const hvacTo   = document.getElementById('cond-hvac-to');
+  if (hvacFrom && hvacTo) {
+    // Convert °C → Lutron (tenths of °F)
+    data.SecondOperand = Math.round((parseFloat(hvacFrom.value) * 9/5 + 32) * 10);
+    data.ThirdOperand  = Math.round((parseFloat(hvacTo.value)   * 9/5 + 32) * 10);
+  }
+  const seqStep = document.getElementById('cond-seq-step');
+  if (seqStep) data.SecondOperand = parseInt(seqStep.value);
+  const lockState = document.getElementById('cond-lock-state');
+  if (lockState) data.SecondOperand = parseInt(lockState.value);
   document.getElementById('cond-editor-overlay')?.remove();
   if (_condSaveCallback) { _condSaveCallback(data); _condSaveCallback = null; }
 }
