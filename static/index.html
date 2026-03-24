@@ -133,6 +133,44 @@
   .prog-led-logic-sel { background: transparent; border: none; color: var(--teal); font-size: 11px; cursor: pointer; padding: 0; font-family: inherit; }
   .prog-led-logic-sel:focus { outline: 1px solid var(--accent); border-radius: 2px; }
   .prog-led-logic-sel option { background: var(--surface2); color: var(--text); }
+  /* Add action button */
+  .prog-add-btn { background: none; border: 1px dashed rgba(255,255,255,0.2); color: var(--text-dim); font-size: 10px; border-radius: 3px; padding: 1px 8px; cursor: pointer; margin-top: 2px; transition: all 0.15s; }
+  .prog-add-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .prog-del-btn { opacity: 0; background: none; border: none; color: #e06c75; font-size: 9px; cursor: pointer; padding: 0 3px; border-radius: 2px; transition: opacity 0.15s; }
+  .prog-line:hover .prog-del-btn { opacity: 0.6; }
+  .prog-del-btn:hover { opacity: 1 !important; background: rgba(224,108,117,0.15); }
+  /* Add action popup menu */
+  .add-action-menu { position: fixed; background: var(--surface2); border: 1px solid rgba(255,255,255,0.15); border-radius: 6px; z-index: 2000; min-width: 150px; padding: 4px 0; box-shadow: 0 4px 16px rgba(0,0,0,0.4); }
+  .add-action-menu div { padding: 6px 14px; cursor: pointer; font-size: 11px; color: var(--text); }
+  .add-action-menu div:hover { background: rgba(255,255,255,0.1); }
+  /* Inline add button (shown on hover to the right of each action line) */
+  .prog-add-inline { opacity: 0; background: none; border: 1px dashed rgba(255,255,255,0.2); color: var(--text-dim); font-size: 9px; border-radius: 2px; padding: 0 5px; cursor: pointer; margin-left: 4px; transition: all 0.15s; vertical-align: middle; }
+  .prog-line:hover .prog-add-inline, .prog-line-run:hover .prog-add-inline { opacity: 1; }
+  .prog-add-inline:hover { border-color: var(--accent) !important; color: var(--accent) !important; opacity: 1 !important; }
+  /* AND/OR condition connector */
+  .prog-connector { color: #c586c0; font-weight: 600; cursor: pointer; padding: 0 2px; border-radius: 2px; }
+  .prog-connector:hover { background: rgba(197,134,192,0.2); }
+  /* Condition picker button */
+  .prog-cond-btn { cursor: pointer; border-radius: 3px; padding: 0 4px; border: 1px solid transparent; transition: border-color 0.12s, background 0.12s; }
+  .prog-cond-btn:hover { border-color: rgba(220,220,170,0.4); background: rgba(220,220,170,0.08); }
+  /* Condition picker dropdown menus */
+  .cond-picker-menu { position: fixed; z-index: 10000; background: var(--surface2); border: 1px solid var(--border); border-radius: 5px; padding: 3px 0; min-width: 190px; box-shadow: 0 4px 16px rgba(0,0,0,0.5); }
+  .cond-picker-menu.cond-sub-menu { max-height: 320px; overflow-y: auto; }
+  .cond-picker-menu .cpi { padding: 5px 14px; cursor: pointer; display: flex; align-items: center; justify-content: space-between; font-size: 12px; white-space: nowrap; }
+  .cond-picker-menu .cpi:hover { background: rgba(74,144,217,0.2); }
+  .cond-picker-menu .cpi.cpi-disabled { color: var(--text-dim); cursor: default; }
+  .cond-picker-menu .cpi.cpi-disabled:hover { background: none; }
+  .cond-picker-menu .cpi.cpi-unknown { color: var(--text-dim); font-style: italic; }
+  .cond-picker-menu .cpi-arrow { color: var(--text-dim); font-size: 10px; margin-left: 8px; flex-shrink: 0; }
+  /* Then ▾ dropdown */
+  .prog-then-drop { cursor: pointer; border-radius: 2px; padding: 0 3px; }
+  .prog-then-drop:hover { background: rgba(197,134,192,0.2); }
+  /* Drag-and-drop */
+  .prog-line[draggable="true"] { cursor: grab; }
+  .prog-line[draggable="true"]:active { cursor: grabbing; }
+  .prog-line.dragging { opacity: 0.35; }
+  .prog-line.drag-over-top { box-shadow: 0 -2px 0 var(--accent); }
+  .prog-line.drag-over-bottom { box-shadow: 0 2px 0 var(--accent); }
 
   /* Scene picker modal */
   .scene-picker-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.55); z-index: 1000; display: flex; align-items: center; justify-content: center; }
@@ -295,6 +333,8 @@ async function openFile(mode) {
   isPl = data.is_pl;
   document.getElementById('save-btn').disabled = !isPl;
   fsTemplates = data.templates || [];
+  // Reset all caches when a new file is loaded
+  _variablesCache = null; _ledsCache = null; _condDataCache = null;
   await loadOverview();
   updateTemplateBar(data.active_template);
   await loadTree();
@@ -685,18 +725,12 @@ function getEventTabDefs(b, pm, eventMap) {
       {key: 2, label: 'Close',      pmKey: 'OffPresetID'},
     ];
   }
-  const tabs = [
+  return [
     {key: 1, label: 'Press',      pmKey: 'PressPresetID'},
     {key: 2, label: 'Release',    pmKey: 'ReleasePresetID'},
     {key: 3, label: 'Double Tap', pmKey: 'DoubleTapPresetID'},
     {key: 4, label: 'Hold',       pmKey: 'HoldPresetId'},
   ];
-  // Only show Double Tap and Hold tabs if they have content or are enabled
-  return tabs.filter(t => {
-    if (t.key === 3) return pm.AllowDoubleTap || (eventMap[3] && eventMap[3].length) || pm.DoubleTapPresetID;
-    if (t.key === 4) return pm.HoldTime || pm.HoldPresetId || (eventMap[4] && eventMap[4].length);
-    return true;
-  });
 }
 
 function getFallbackPreset(pm, pmKey) {
@@ -732,12 +766,12 @@ function renderButtonProgramDetail(b, pm, presetNames, trigTrees) {
     ${pm.HoldTime ? `<span style="color:var(--text-dim)">Hold: ${pm.HoldTime}ms</span>` : ''}
   </div>`;
 
-  // Build eventMap: TriggerType → actions[]
+  // Build eventMap: TriggerType → {triggerID, actions[]}
   const tree = trigTrees[pm.ParentID] || trigTrees[pm.ProgrammingModelID] || [];
   const eventMap = {};
   tree.forEach(trig => {
-    if (!eventMap[trig.TriggerType]) eventMap[trig.TriggerType] = [];
-    eventMap[trig.TriggerType].push(...trig.actions);
+    if (!eventMap[trig.TriggerType]) eventMap[trig.TriggerType] = {triggerID: trig.TriggerID, actions: []};
+    eventMap[trig.TriggerType].actions.push(...trig.actions);
   });
 
   // Also collect any unknown trigger types (not 1-4) to show as-is
@@ -749,9 +783,10 @@ function renderButtonProgramDetail(b, pm, presetNames, trigTrees) {
   // Build sub-tabs
   html += `<div class="prog-event-tabs">`;
   tabDefs.forEach((td, i) => {
-    const treeActions = eventMap[td.key] || [];
+    const evEntryTab = eventMap[td.key];
+    const treeActionsTab = evEntryTab ? evEntryTab.actions : [];
     const fallback = getFallbackPreset(pm, td.pmKey);
-    const hasData = treeActions.length > 0 || !!fallback;
+    const hasData = treeActionsTab.length > 0 || !!fallback;
     html += `<div class="prog-event-tab ${i === 0 ? 'active' : ''} ${hasData ? 'has-data' : ''}"
       id="${uid}-etab-${td.key}"
       onclick="switchEventTab('${uid}', ${td.key})">${td.label}</div>`;
@@ -760,12 +795,14 @@ function renderButtonProgramDetail(b, pm, presetNames, trigTrees) {
 
   // Build content panels
   tabDefs.forEach((td, i) => {
-    const treeActions = eventMap[td.key] || [];
+    const evEntry = eventMap[td.key];
+    const treeActions = evEntry ? evEntry.actions : [];
+    const triggerId = evEntry ? evEntry.triggerID : null;
     const fallback = getFallbackPreset(pm, td.pmKey);
     html += `<div class="prog-event-panel ${i === 0 ? 'active' : ''}" id="${uid}-epanel-${td.key}">`;
     if (treeActions.length) {
       html += '<div class="prog-actions">';
-      html += renderActionList(treeActions, presetNames, 0, pm);
+      html += renderActionList(treeActions, presetNames, 0, pm, triggerId);
       html += '</div>';
     } else if (fallback) {
       const lbl = presetLabel(fallback, presetNames);
@@ -774,7 +811,12 @@ function renderButtonProgramDetail(b, pm, presetNames, trigTrees) {
         <span style="color:var(--text-dim)">Run </span><span class="prog-action">${lbl}</span><span class="prog-edit-hint">✎</span>
       </div></div>`;
     } else {
-      html += `<div class="prog-no-data">アクションなし</div>`;
+      html += `<div class="prog-no-data" style="font-size:11px;color:var(--text-dim);padding:4px 0">アクションなし</div>`;
+    }
+    // Bottom add button only for empty panels (non-empty panels use hover inline button)
+    if (!treeActions.length && !fallback) {
+      const addTriggerId = triggerId || null;
+      html += `<div style="padding:2px 0">${renderAddBtn(addTriggerId, pmId, td.key, 0)}</div>`;
     }
     html += `</div>`;
   });
@@ -783,10 +825,11 @@ function renderButtonProgramDetail(b, pm, presetNames, trigTrees) {
   if (extraTypes.length) {
     html += `<div class="prog-actions" style="margin-top:8px;padding-top:6px;border-top:1px solid rgba(255,255,255,0.06)">`;
     extraTypes.forEach(k => {
+      const evEntry = eventMap[k];
+      if (!evEntry || !evEntry.actions.length) return;
       const tLabel = TRIGGER_TYPE[k] || `Event:${k}`;
-      if (!(eventMap[k] || []).length) return;
       html += `<div class="prog-line"><span class="prog-keyword">${tLabel}</span></div>`;
-      html += renderActionList(eventMap[k], presetNames, 1, pm);
+      html += renderActionList(evEntry.actions, presetNames, 1, pm, evEntry.triggerID);
     });
     html += `</div>`;
   }
@@ -805,16 +848,25 @@ function switchEventTab(uid, tabKey) {
 
 // ── Condition text builder ────────────────────
 // Condition data comes from tblEvaluation rows attached as act.evaluations.
-// ConditionType: 0=Variable, 5=LED, 23=SystemProperty, 1=Time
-// EvaluationOperator: 3=Equal, 4=NotEqual
+// ConditionType: 0=Variable, 1=Time/DoW/MoY, 2=OccScene, 3=CCO, 4=ZoneBinary, 5=LED, 6=AreaOccupancy, 7=ZoneLevel, 23=SystemProperty
+// EvaluationOperator: 3=Equal, 4=NotEqual, 9=IsFrom, 10=IsNotFrom
 
 const SYSTEM_PROP_NAMES = {
-  149: 'Occupancy Mode',
+  149: 'Presence Status',
   150: 'Emergency Mode',
-  151: 'DND Mode',
-  152: 'System Mode 152',
+  151: 'Do Not Disturb',
+  152: 'Room State',
+  153: 'Make Up Room',
+  154: 'First Guest Entry',
+  155: 'Turndown Service',
   156: 'ADA Mode',
+  157: 'Automation',
 };
+
+const _DOW_NAMES = {1:'Mon',2:'Tue',3:'Wed',4:'Thu',5:'Fri',6:'Sat',7:'Sun'};
+const _MON_NAMES = {1:'Jan',2:'Feb',3:'Mar',4:'Apr',5:'May',6:'Jun',7:'Jul',8:'Aug',9:'Sep',10:'Oct',11:'Nov',12:'Dec'};
+function _dowName(v) { const d = ((v - 1) % 7) + 1; return _DOW_NAMES[d] || `Day:${v}`; }
+function _monName(v) { return _MON_NAMES[v] || `Month:${v}`; }
 
 function evalOpText(op) { return op === 4 ? 'is not' : 'is'; }
 
@@ -836,72 +888,173 @@ function encodeLutronTime(todCode, offsetMin) {
   return ((todCode & 0xFFFF) << 16) | (offsetMin & 0xFFFF);
 }
 
-function buildConditionText(act, presetNames, pm) {
-  const evals = act.evaluations;
-  if (evals && evals.length) {
-    const cond = evals.find(e => e.ObjectType !== 236) || evals[0];
-    if (cond) {
-      const op = evalOpText(cond.EvaluationOperator);
-      if (cond.ConditionType === 0 && cond.ObjectType !== 236) {
-        const varName = cond._var_name || `Var:${cond.FirstOperandObjectID}`;
-        const stateName = cond._state_name || `State:${cond.SecondOperand}`;
-        return `${varName} ${op} ${stateName}`;
-      } else if (cond.ConditionType === 5) {
-        const station = cond._led_station_name || '';
-        const ledNum = cond._led_number != null ? `LED ${cond._led_number}` : `LED:${cond.FirstOperandObjectID}`;
-        const label = station ? `${station} ${ledNum}` : ledNum;
-        return `${label} ${op} ${cond.SecondOperand === 1 ? 'On' : 'Off'}`;
-      } else if (cond.ConditionType === 23) {
-        const propName = SYSTEM_PROP_NAMES[cond.FirstOperandRefProperty] || `Prop:${cond.FirstOperandRefProperty}`;
-        return `${propName} ${op} ${cond.SecondOperand}`;
-      } else if (cond.ConditionType === 1) {
-        return `Time of Day is from ${decodeLutronTime(cond.SecondOperand)} to ${decodeLutronTime(cond.ThirdOperand)}`;
-      }
+function buildSingleConditionText(cond, presetNames, pm) {
+  if (!cond || cond.ObjectType === 236) return null;
+  const op = evalOpText(cond.EvaluationOperator);
+  if (cond.ConditionType === 0) {
+    const varName = cond._var_name || `Var:${cond.FirstOperandObjectID}`;
+    const stateName = cond._state_name || `State:${cond.SecondOperand}`;
+    return `${varName} ${op} ${stateName}`;
+  } else if (cond.ConditionType === 5) {
+    const station = cond._led_station_name || '';
+    const ledNum = cond._led_number != null ? `LED ${cond._led_number}` : `LED:${cond.FirstOperandObjectID}`;
+    const label = station ? `${station} ${ledNum}` : ledNum;
+    return `${label} ${op} ${cond.SecondOperand === 1 ? 'On' : 'Off'}`;
+  } else if (cond.ConditionType === 23) {
+    const propName = SYSTEM_PROP_NAMES[cond.FirstOperandRefProperty] || `Prop:${cond.FirstOperandRefProperty}`;
+    return `${propName} ${op} ${cond.SecondOperand}`;
+  } else if (cond.ConditionType === 1) {
+    const prop = cond.FirstOperandRefProperty;
+    if (prop === 53) {
+      return `Day of Week from ${_dowName(cond.SecondOperand)} to ${_dowName(cond.ThirdOperand)}`;
+    } else if (prop === 54) {
+      return `Month of Year from ${_monName(cond.SecondOperand)} to ${_monName(cond.ThirdOperand)}`;
     }
+    return `Time of Day from ${decodeLutronTime(cond.SecondOperand)} to ${decodeLutronTime(cond.ThirdOperand)}`;
+  } else if (cond.ConditionType === 2) {
+    const name = cond._occ_group_name || `OccGroup:${cond.FirstOperandObjectID}`;
+    return `${name} ${op} scene ${cond.SecondOperand}`;
+  } else if (cond.ConditionType === 3) {
+    const name = cond._zone_name || `Zone:${cond.FirstOperandObjectID}`;
+    return `${name} ${op} ${cond.SecondOperand === 0 ? 'Open' : 'Closed'}`;
+  } else if (cond.ConditionType === 4) {
+    const name = cond._zone_name || `Zone:${cond.FirstOperandObjectID}`;
+    return `${name} ${op} ${cond.SecondOperand === 0 ? 'Open' : 'Closed'}`;
+  } else if (cond.ConditionType === 6) {
+    const name = cond._area_name || `Area:${cond.FirstOperandObjectID}`;
+    return `${name} ${op} Occupied`;
+  } else if (cond.ConditionType === 7) {
+    const name = cond._zone_name || `Zone:${cond.FirstOperandObjectID}`;
+    return `${name} level from ${cond.SecondOperand} to ${cond.ThirdOperand}`;
+  } else if (cond.ConditionType === 8) {
+    const name = cond._shade_name || `Shade:${cond.FirstOperandObjectID}`;
+    return `${name} ${op} Open`;
+  } else if (cond.ConditionType === 9) {
+    const name = cond._tc_name || `Timeclock:${cond.FirstOperandObjectID}`;
+    return `${name} ${op} Enabled`;
+  } else if (cond.ConditionType === 10) {
+    const seqName = cond._seq_name || `Seq:${cond.FirstOperandObjectID}`;
+    const stepName = cond._step_name || `Step:${cond.SecondOperand}`;
+    return `${seqName} ${op} ${stepName}`;
+  } else if (cond.ConditionType === 14) {
+    const name = cond._zone_name || `HVAC:${cond.FirstOperandObjectID}`;
+    const fromC = ((cond.SecondOperand / 10 - 32) * 5 / 9).toFixed(0);
+    const toC = ((cond.ThirdOperand / 10 - 32) * 5 / 9).toFixed(0);
+    return `${name} temp from ${fromC}°C to ${toC}°C`;
+  } else if (cond.ConditionType === 18) {
+    const name = cond._dev_station_name || `Device:${cond.FirstOperandObjectID}`;
+    return `${name} Lock State ${op} ${cond.SecondOperand === 2 ? 'Locked' : 'Unlocked'}`;
   }
-  if (act.Notes && act.Notes.trim()) return act.Notes;
-  return null;
+  return `CT:${cond.ConditionType} OT:${cond.FirstOperandObjectType} ID:${cond.FirstOperandObjectID}`;
 }
 
-function renderActionList(actions, presetNames, depth, pm) {
+const _condPickerData = {};
+
+function renderConditionsHtml(evals, presetNames, pm, actionId) {
+  if (!evals || !evals.length) {
+    return `<span class="prog-condition prog-cond-btn" onclick="event.stopPropagation();openCondPicker(event,null,${actionId})">Select a condition ▾</span>`;
+  }
+  const sorted = [...evals].sort((a, b) => (a.SortOrder ?? 0) - (b.SortOrder ?? 0));
+  let html = '';
+  sorted.forEach(e => {
+    if (e.ObjectType === 236) {
+      const opText = e.EvaluationOperator === 2 ? 'Or' : 'and';
+      html += ` <span class="prog-connector" onclick="event.stopPropagation();toggleConnector(${e.EvaluationID},this)" title="クリックでand/Or切替">${opText}</span> `;
+    } else {
+      _condPickerData[e.EvaluationID] = e;
+      const condText = buildSingleConditionText(e, presetNames, pm);
+      const label = condText || 'Select a condition';
+      html += `<span class="prog-condition prog-cond-btn" onclick="event.stopPropagation();openCondPicker(event,${e.EvaluationID},${actionId})">${label} ▾</span>`;
+    }
+  });
+  return html;
+}
+
+function renderAddBtn(triggerId, pmId, triggerType, depth) {
+  const pad = depth * 16;
+  if (triggerId) {
+    return `<button class="prog-add-btn" style="margin-left:${pad}px"
+      onclick="showAddMenu(event,${triggerId},null)">+ 追加</button>`;
+  } else if (pmId && triggerType) {
+    // No trigger yet — need to create one first
+    return `<button class="prog-add-btn" style="margin-left:${pad}px"
+      onclick="showAddMenu(event,null,${pmId},${triggerType})">+ 追加</button>`;
+  }
+  return '';
+}
+
+function renderActionList(actions, presetNames, depth, pm, parentTriggerId) {
   if (!actions || !actions.length) return '';
   const pad = depth * 16;
   let html = '';
 
   actions.forEach(act => {
+    const delBtn = act.ActionID
+      ? `<button class="prog-del-btn" onclick="event.stopPropagation();deleteAction(${act.ActionID})" title="削除">✕</button>`
+      : '';
+    const ctxMenu = act.ActionID && parentTriggerId
+      ? ` oncontextmenu="event.preventDefault();event.stopPropagation();showInsertMenu(event,${parentTriggerId},${act.ActionID})"`
+      : '';
+    const addInlineBtn = act.ActionID && parentTriggerId
+      ? `<button class="prog-add-inline" onclick="event.stopPropagation();showAddMenu(event,${parentTriggerId},null,null,${act.ActionID})" title="この下に追加">＋</button>`
+      : '';
+    const dragAttrs = act.ActionID && parentTriggerId
+      ? ` draggable="true" data-action-id="${act.ActionID}" data-trigger-id="${parentTriggerId}" ondragstart="actionDragStart(event,this)" ondragover="actionDragOver(event,this)" ondragleave="actionDragLeave(event,this)" ondrop="actionDrop(event,this)" ondragend="actionDragEnd(event,this)"`
+      : '';
+
     if (act.ObjectType === 235) {
       // Delay
-      html += `<div class="prog-line" style="padding-left:${pad}px"><span class="prog-keyword">Delay</span> <span style="color:var(--text-dim)">${act.DelayTime}ms</span></div>`;
+      const secs = act.DelayTime || 0;
+      const h = Math.floor(secs/3600), m = Math.floor((secs%3600)/60), s = secs%60;
+      html += `<div class="prog-line" style="padding-left:${pad}px"${ctxMenu}${dragAttrs}>
+        <span class="prog-keyword">Delay</span> <span style="color:var(--text-dim)">${h}h ${m}m ${s}s</span>${addInlineBtn}${delBtn}</div>`;
+
     } else if (act.ObjectType === 233) {
       // Conditional If/Then/Else/End If
       const subTrigs = act.sub_triggers || [];
       const thenBranch = subTrigs.filter(st => st.TriggerType === 5);
       const elseBranch = subTrigs.filter(st => st.TriggerType === 6);
-      const condText = buildConditionText(act, presetNames, pm);
       const evals = act.evaluations || [];
-      const editableCond = evals.find(e => e.ObjectType !== 236);
-      const condDisplay = condText
-        ? `<span class="prog-condition prog-line-run" onclick="editCondition(${JSON.stringify(editableCond || null).replace(/"/g, '&quot;')})">${condText}<span class="prog-edit-hint">✎</span></span>`
-        : `<span class="prog-condition prog-line-run" onclick="editCondition(${JSON.stringify(editableCond || null).replace(/"/g, '&quot;')})" style="font-style:italic">(condition)<span class="prog-edit-hint">✎</span></span>`;
-      html += `<div class="prog-line" style="padding-left:${pad}px"><span class="prog-keyword">If</span> ${condDisplay} <span class="prog-keyword">Then</span></div>`;
-      thenBranch.forEach(st => { html += renderActionList(st.actions, presetNames, depth + 1, pm); });
+      const condDisplay = renderConditionsHtml(evals, presetNames, pm, act.ActionID);
+      const thenDrop = `<span class="prog-keyword prog-then-drop" onclick="event.stopPropagation();showAddConditionMenu(event,${act.ActionID})" title="条件を追加">Then ▾</span>`;
+      html += `<div class="prog-line" style="padding-left:${pad}px"${ctxMenu}${dragAttrs}>
+        <span class="prog-keyword">If</span> ${condDisplay} ${thenDrop}${addInlineBtn}${delBtn}</div>`;
+
+      // Then branch
+      thenBranch.forEach(st => {
+        html += renderActionList(st.actions, presetNames, depth + 1, pm, st.TriggerID);
+        if (!st.actions || !st.actions.length)
+          html += renderAddBtn(st.TriggerID, null, null, depth + 1);
+      });
+
+      // Else branch
       if (elseBranch.length) {
         html += `<div class="prog-line" style="padding-left:${pad}px"><span class="prog-keyword">Else</span></div>`;
-        elseBranch.forEach(st => { html += renderActionList(st.actions, presetNames, depth + 1, pm); });
+        elseBranch.forEach(st => {
+          html += renderActionList(st.actions, presetNames, depth + 1, pm, st.TriggerID);
+          if (!st.actions || !st.actions.length)
+            html += renderAddBtn(st.TriggerID, null, null, depth + 1);
+        });
+      } else {
+        html += `<div style="padding-left:${pad}px;padding-top:2px">
+          <button class="prog-add-btn" onclick="addElseBranch(${act.ActionID})">+ Else を追加</button>
+        </div>`;
       }
       html += `<div class="prog-line" style="padding-left:${pad}px"><span class="prog-keyword">End If</span></div>`;
+
     } else {
-      // Run / Stop action — editable
+      // Run / Stop action
       const label = presetLabel(act.PresetId, presetNames);
       const execType = act.ExecutionType === 1 ? 'Run' : 'Stop';
       if (execType === 'Run' && act.ActionID) {
         const pmId = pm ? pm.ProgrammingModelID : null;
         html += `<div class="prog-line prog-line-run" style="padding-left:${pad}px"
-          onclick="editRunAction(${act.ActionID}, ${act.PresetId ?? 'null'}, ${pmId ?? 'null'})">
-          <span style="color:var(--text-dim)">Run </span><span class="prog-action">${label}</span><span class="prog-edit-hint">✎</span>
+          onclick="editRunAction(${act.ActionID}, ${act.PresetId ?? 'null'}, ${pmId ?? 'null'})"${ctxMenu}${dragAttrs}>
+          <span style="color:var(--text-dim)">Run </span><span class="prog-action">${label}</span><span class="prog-edit-hint">✎</span>${addInlineBtn}${delBtn}
         </div>`;
       } else {
-        html += `<div class="prog-line" style="padding-left:${pad}px"><span style="color:var(--text-dim)">${execType} </span><span class="prog-action">${label}</span></div>`;
+        html += `<div class="prog-line" style="padding-left:${pad}px"${ctxMenu}${dragAttrs}>
+          <span style="color:var(--text-dim)">${execType} </span><span class="prog-action">${label}</span>${addInlineBtn}${delBtn}</div>`;
       }
     }
   });
@@ -1160,6 +1313,7 @@ async function editPmBool(pmId, field, checked) {
 // ── Condition editing ──────────────────────────
 let _variablesCache = null;
 let _ledsCache = null;
+// _condDataCache and _condPickerMenus/timer are declared near openCondPicker
 
 async function loadVariables() {
   if (!_variablesCache) {
@@ -1177,6 +1331,359 @@ async function loadLeds() {
   return _ledsCache;
 }
 
+let _condDataCache = null;
+async function loadCondData() {
+  if (!_condDataCache) {
+    const r = await fetch('/api/cond-data');
+    _condDataCache = await r.json();
+  }
+  return _condDataCache;
+}
+
+// ── Condition picker (hierarchical 2-level menu) ──────────────
+let _condPickerMenus = [];  // [primary, submenu] DOM elements
+let _condSubTimer = null;
+
+function _closeCondPickerMenus() {
+  if (_condSubTimer) { clearTimeout(_condSubTimer); _condSubTimer = null; }
+  _condPickerMenus.forEach(m => m?.remove());
+  _condPickerMenus = [];
+}
+
+function _clearCondSubTimer() {
+  if (_condSubTimer) { clearTimeout(_condSubTimer); _condSubTimer = null; }
+}
+
+function _scheduleCondSubClose() {
+  _clearCondSubTimer();
+  _condSubTimer = setTimeout(() => {
+    _condPickerMenus[1]?.remove();
+    _condPickerMenus[1] = null;
+    _condSubTimer = null;
+  }, 150);
+}
+
+// areaLabel: "ParentArea ▶ Area" or just "Area" if no parent
+function _areaLabel(areaName, parentAreaName) {
+  return parentAreaName ? `${parentAreaName} ▶ ${areaName}` : (areaName || '');
+}
+
+// Build category items with unknown ConditionType — show but can't save
+function _unknownItem(label, typeData) {
+  return { label, condType: -1, typeData, typeFields: {}, unknownType: true };
+}
+
+async function openCondPicker(event, evalId, actionId) {
+  event.stopPropagation();
+  _closeCondPickerMenus();
+  document.querySelectorAll('.add-action-menu').forEach(m => m.remove());
+
+  const currentCond = evalId ? (_condPickerData[evalId] || null) : null;
+
+  // Load all data upfront (all cached after first call)
+  const [vars, leds, cd] = await Promise.all([loadVariables(), loadLeds(), loadCondData()]);
+
+  const sysProps = Object.entries(SYSTEM_PROP_NAMES).map(([id, name]) => ({
+    label: name, condType: 23,
+    typeData: { propId: parseInt(id) },
+    typeFields: { ConditionType: 23, FirstOperandObjectType: 400, FirstOperandObjectID: 34 },
+  }));
+
+  // LED items grouped by Area ▶ Device
+  const ledItems = leds.map(l => {
+    const area = _areaLabel(l.AreaName, l.ParentAreaName);
+    const label = area ? `${area} ▶ ${l.StationName || l.DeviceName} — LED ${l.LedNumber}`
+                       : `${l.StationName || l.DeviceName} — LED ${l.LedNumber}`;
+    return {
+      label, condType: 5,
+      typeData: { ledId: l.LedID },
+      typeFields: { ConditionType: 5, FirstOperandObjectType: 107, FirstOperandRefProperty: 23 },
+    };
+  });
+
+  const categories = [
+    {
+      label: 'Variables',
+      items: vars.map(v => ({
+        label: v.Name, condType: 0,
+        typeData: { varId: v.VariableID },
+        typeFields: { ConditionType: 0, FirstOperandObjectType: 169, FirstOperandRefProperty: 42 },
+      })),
+    },
+    {
+      label: 'Time Period',
+      items: [
+        { label: 'Time of Day', condType: 1, typeData: {},
+          typeFields: { ConditionType: 1, ObjectTypeOverride: 241, EvaluationOperator: 9,
+                        FirstOperandObjectType: 1, FirstOperandObjectID: 2, FirstOperandRefProperty: 68 } },
+      ],
+    },
+    {
+      label: 'Occupancy',
+      items: (cd.occupancy || []).map(r => ({
+        label: r.OGName || _areaLabel(r.AreaName, r.ParentAreaName),
+        condType: 2,
+        typeData: { occupancyGroupId: r.OccupancyGroupID },
+        typeFields: { ConditionType: 2, FirstOperandObjectType: 38, FirstOperandObjectID: r.OccupancyGroupID },
+      })),
+    },
+    {
+      label: 'Contact Closure Inputs',
+      items: (cd.cci || []).map(r => ({
+        label: `${_areaLabel(r.AreaName, r.ParentAreaName)} ▶ ${r.EnclosureName} ▶ ${r.InputName}`,
+        condType: 3,
+        typeData: { zoneId: r.SensorConnectionID },
+        typeFields: { ConditionType: 3, FirstOperandObjectType: 66, FirstOperandObjectID: r.SensorConnectionID },
+      })),
+    },
+    {
+      label: 'Contact Closure Outputs',
+      items: (cd.cco || []).map(r => ({
+        label: `${_areaLabel(r.AreaName, r.ParentAreaName)} ▶ ${r.ZoneName}`,
+        condType: 4,
+        typeData: { zoneId: r.ZoneID },
+        typeFields: { ConditionType: 4, FirstOperandObjectType: 15, FirstOperandObjectID: r.ZoneID },
+      })),
+    },
+    { label: 'LED State', items: ledItems },
+    {
+      label: 'Lighting - Areas',
+      items: (cd.areas || []).map(r => ({
+        label: _areaLabel(r.AreaName, r.ParentAreaName),
+        condType: 6,
+        typeData: { areaId: r.AreaID },
+        typeFields: { ConditionType: 6, FirstOperandObjectType: 2, FirstOperandObjectID: r.AreaID },
+      })),
+    },
+    {
+      label: 'Lighting - Zones',
+      items: (cd.zones || []).map(r => ({
+        label: `${_areaLabel(r.AreaName, r.ParentAreaName)} ▶ ${r.ZoneName}`,
+        condType: 7,
+        typeData: { zoneId: r.ZoneID },
+        typeFields: { ConditionType: 7, FirstOperandObjectType: 15, FirstOperandObjectID: r.ZoneID },
+      })),
+    },
+    {
+      label: 'Timeclocks',
+      items: (cd.timeclocks || []).map(r => ({
+        label: r.ModeName ? `${r.TimeclockName} / ${r.ModeName}` : r.TimeclockName,
+        condType: 9,
+        typeData: { timeclockId: r.TimeClockID, modeId: r.TimeClockModeID },
+        typeFields: { ConditionType: 9, FirstOperandObjectType: 19, FirstOperandObjectID: r.TimeClockID, SecondOperand: r.TimeClockModeID || 0 },
+      })),
+    },
+    {
+      label: 'Sequences',
+      items: (cd.sequences || []).map(r => ({
+        label: r.SequenceName,
+        condType: 10,
+        typeData: { sequenceId: r.SequenceID },
+        typeFields: { ConditionType: 10, FirstOperandObjectType: 90, FirstOperandObjectID: r.SequenceID },
+      })),
+    },
+    {
+      label: 'HVAC Zones',
+      items: (cd.hvac || []).map(r => ({
+        label: `${_areaLabel(r.AreaName, r.ParentAreaName)} ▶ ${r.ZoneName}`,
+        condType: 14,
+        typeData: { zoneId: r.ZoneID },
+        typeFields: { ConditionType: 14, FirstOperandObjectType: 211, FirstOperandObjectID: r.ZoneID },
+      })),
+    },
+    {
+      label: 'Devices',
+      items: (cd.devices || []).map(r => ({
+        label: `${_areaLabel(r.AreaName, r.ParentAreaName)} ▶ ${r.DeviceName}`,
+        condType: 18,
+        typeData: { deviceId: r.ControlStationDeviceID },
+        typeFields: { ConditionType: 18, FirstOperandObjectType: 5, FirstOperandObjectID: r.ControlStationDeviceID },
+      })),
+    },
+    { label: 'Room Properties', items: sysProps },
+  ];
+
+  // Build the primary menu
+  const primary = document.createElement('div');
+  primary.className = 'cond-picker-menu';
+  primary.addEventListener('mouseenter', _clearCondSubTimer);
+  _condPickerMenus[0] = primary;
+
+  categories.forEach(cat => {
+    const hasItems = cat.items.length > 0;
+    const el = document.createElement('div');
+    el.className = 'cpi';
+    el.innerHTML = `<span>${cat.label}</span><span class="cpi-arrow">▶</span>`;
+
+    el.addEventListener('mouseenter', () => {
+      _clearCondSubTimer();
+      _condPickerMenus[1]?.remove();
+      _condPickerMenus[1] = null;
+
+      const sub = document.createElement('div');
+      sub.className = 'cond-picker-menu cond-sub-menu';
+      sub.addEventListener('mouseenter', _clearCondSubTimer);
+      sub.addEventListener('mouseleave', _scheduleCondSubClose);
+      _condPickerMenus[1] = sub;
+
+      if (!hasItems) {
+        const empty = document.createElement('div');
+        empty.className = 'cpi cpi-disabled';
+        empty.innerHTML = '<span style="font-style:italic">データなし</span>';
+        sub.appendChild(empty);
+      }
+
+      cat.items.forEach(item => {
+        const sEl = document.createElement('div');
+        sEl.className = 'cpi' + (item.unknownType ? ' cpi-unknown' : '');
+        const isSelected = !item.unknownType && currentCond &&
+          currentCond.ConditionType === item.condType &&
+          ((item.typeData.varId && currentCond.FirstOperandObjectID == item.typeData.varId) ||
+           (item.typeData.ledId && currentCond.FirstOperandObjectID == item.typeData.ledId) ||
+           (item.typeData.propId && currentCond.FirstOperandRefProperty == item.typeData.propId) ||
+           (item.condType === 1 && currentCond.ConditionType === 1) ||
+           (item.typeData.zoneId && currentCond.FirstOperandObjectID == item.typeData.zoneId) ||
+           (item.typeData.areaId && currentCond.FirstOperandObjectID == item.typeData.areaId) ||
+           (item.typeData.occupancyGroupId && currentCond.FirstOperandObjectID == item.typeData.occupancyGroupId) ||
+           (item.typeData.timeclockId && currentCond.FirstOperandObjectID == item.typeData.timeclockId) ||
+           (item.typeData.sequenceId && currentCond.FirstOperandObjectID == item.typeData.sequenceId) ||
+           (item.typeData.deviceId && currentCond.FirstOperandObjectID == item.typeData.deviceId));
+        sEl.innerHTML = `<span style="${isSelected ? 'color:var(--accent)' : ''}">${item.label}</span>`;
+        sEl.addEventListener('click', e => {
+          e.stopPropagation();
+          _closeCondPickerMenus();
+          if (item.unknownType) {
+            showToast('このConditionTypeはまだ未対応です（DB上のConditionTypeが不明）');
+            return;
+          }
+          openCondValueEditor(evalId, actionId, item.condType, item.typeData, item.typeFields, currentCond, vars, leds);
+        });
+        sub.appendChild(sEl);
+      });
+
+      // Position right of primary, clamped to viewport
+      const prRect = primary.getBoundingClientRect();
+      const elRect = el.getBoundingClientRect();
+      const vh = window.innerHeight;
+      const subH = Math.min(cat.items.length * 27 + 6, 320);
+      const top = Math.min(elRect.top, vh - subH - 8);
+      sub.style.cssText = `top:${top}px;left:${prRect.right + 2}px`;
+      document.body.appendChild(sub);
+    });
+
+    el.addEventListener('mouseleave', _scheduleCondSubClose);
+    primary.appendChild(el);
+  });
+
+  // Position primary menu, clamped to viewport
+  const rect = event.currentTarget?.getBoundingClientRect?.() || { bottom: event.clientY, left: event.clientX };
+  const vh = window.innerHeight;
+  const ph = categories.length * 27 + 6;
+  const top = Math.min(rect.bottom + 2, vh - ph - 8);
+  primary.style.cssText = `top:${top}px;left:${rect.left}px`;
+  document.body.appendChild(primary);
+
+  setTimeout(() => document.addEventListener('click', _closeCondPickerMenus, { once: true }), 0);
+}
+
+async function openCondValueEditor(evalId, actionId, condType, typeData, typeFields, currentCond, vars, leds) {
+  // Build a condition object for the pickers (use existing if condType matches, else build default)
+  let cond;
+  if (currentCond && currentCond.ConditionType === condType) {
+    cond = currentCond;
+  } else {
+    cond = {
+      EvaluationID: evalId,
+      ConditionType: condType,
+      EvaluationOperator: condType === 1 ? 9 : 3,
+      FirstOperandObjectID: typeData.varId || typeData.ledId || typeData.zoneId || typeData.areaId ||
+                            typeData.occupancyGroupId || typeData.timeclockId || typeData.sequenceId ||
+                            typeData.deviceId || typeFields.FirstOperandObjectID || null,
+      FirstOperandRefProperty: typeData.propId || typeFields.FirstOperandRefProperty || null,
+      SecondOperand: condType === 5 ? 1 : (typeFields.SecondOperand ?? 0),
+      ThirdOperand: null,
+    };
+  }
+
+  let title, bodyHtml;
+  if (condType === 0) {
+    const adjustedCond = { ...cond, FirstOperandObjectID: typeData.varId ?? cond.FirstOperandObjectID };
+    title = 'Variable 条件';
+    bodyHtml = buildVariablePicker(vars, adjustedCond);
+  } else if (condType === 5) {
+    const adjustedCond = { ...cond, FirstOperandObjectID: typeData.ledId ?? cond.FirstOperandObjectID };
+    title = 'LED State 条件';
+    bodyHtml = buildLedPicker(leds, adjustedCond);
+  } else if (condType === 23) {
+    const adjustedCond = { ...cond, FirstOperandRefProperty: typeData.propId ?? cond.FirstOperandRefProperty };
+    title = 'Room Properties 条件';
+    bodyHtml = buildSysPropPicker(adjustedCond);
+  } else if (condType === 1) {
+    title = 'Time of Day 条件';
+    bodyHtml = buildTimePicker(cond);
+  } else if (condType === 2) {
+    title = 'Occupancy Group 条件';
+    bodyHtml = buildOccupancyGroupPicker(cond);
+  } else if (condType === 3) {
+    title = 'Contact Closure Output 条件';
+    bodyHtml = buildBinaryStatePicker(cond, 'Open', 'Closed', 0, 1);
+  } else if (condType === 6) {
+    title = 'Area Occupancy 条件';
+    bodyHtml = buildIsNotPicker(cond, 'Occupied');
+  } else if (condType === 7) {
+    title = 'Zone Level 条件';
+    bodyHtml = buildLevelRangePicker(cond);
+  } else if (condType === 8) {
+    title = 'Shade Group 条件';
+    bodyHtml = buildIsNotPicker(cond, 'Open');
+  } else if (condType === 9) {
+    title = 'Timeclock 条件';
+    bodyHtml = buildIsNotPicker(cond, 'Enabled');
+  } else if (condType === 10) {
+    const cd = await loadCondData();
+    title = 'Sequence 条件';
+    bodyHtml = buildSequenceStepPicker(cond, cd, typeData.sequenceId ?? cond.FirstOperandObjectID);
+  } else if (condType === 14) {
+    title = 'HVAC Zone 条件';
+    bodyHtml = buildHvacTempPicker(cond);
+  } else if (condType === 18) {
+    title = 'Device Lock State 条件';
+    bodyHtml = buildLockStatePicker(cond);
+  } else {
+    showToast(`ConditionType ${condType} は未対応`);
+    return;
+  }
+
+  _showConditionModal(title, bodyHtml, async (data) => {
+    // Strip internal-only key before sending
+    const { ObjectTypeOverride, ...rest } = typeFields;
+    const payload = { ...rest, ...data };
+    if (ObjectTypeOverride) payload._objectType = ObjectTypeOverride;
+    await _saveOrCreateCondition(evalId, actionId, payload);
+  });
+}
+
+async function _saveOrCreateCondition(evalId, actionId, data) {
+  // _objectType is an internal hint for the correct tblEvaluation ObjectType
+  const { _objectType, ...payload } = data;
+  if (_objectType) payload.ObjectType = _objectType;
+  let res;
+  if (evalId != null) {
+    res = await fetch(`/api/evaluation/${evalId}`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  } else {
+    res = await fetch(`/api/action/${actionId}/create-evaluation`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  }
+  const d = await res.json();
+  if (d.error) { showToast('エラー: ' + d.error); return; }
+  await reloadPrograms();
+}
+
 async function editCondition(condJson) {
   let cond;
   try { cond = typeof condJson === 'string' ? JSON.parse(condJson) : condJson; } catch { cond = null; }
@@ -1185,25 +1692,58 @@ async function editCondition(condJson) {
   const ct = cond.ConditionType;
 
   if (ct === 0) {
-    // Variable state
     const vars = await loadVariables();
     _showConditionModal('Variable 条件を変更', buildVariablePicker(vars, cond), async (data) => {
       await _saveCondition(cond.EvaluationID, data);
     });
   } else if (ct === 5) {
-    // LED state
     const leds = await loadLeds();
     _showConditionModal('LED 条件を変更', buildLedPicker(leds, cond), async (data) => {
       await _saveCondition(cond.EvaluationID, data);
     });
   } else if (ct === 23) {
-    // System property
     _showConditionModal('System Property 条件を変更', buildSysPropPicker(cond), async (data) => {
       await _saveCondition(cond.EvaluationID, data);
     });
   } else if (ct === 1) {
-    // Time of Day
     _showConditionModal('Time of Day 条件を変更', buildTimePicker(cond), async (data) => {
+      await _saveCondition(cond.EvaluationID, data);
+    });
+  } else if (ct === 2) {
+    _showConditionModal('Occupancy Group 条件を変更', buildOccupancyGroupPicker(cond), async (data) => {
+      await _saveCondition(cond.EvaluationID, data);
+    });
+  } else if (ct === 3) {
+    _showConditionModal('Contact Closure Output 条件を変更', buildBinaryStatePicker(cond, 'Open', 'Closed', 0, 1), async (data) => {
+      await _saveCondition(cond.EvaluationID, data);
+    });
+  } else if (ct === 6) {
+    _showConditionModal('Area Occupancy 条件を変更', buildIsNotPicker(cond, 'Occupied'), async (data) => {
+      await _saveCondition(cond.EvaluationID, data);
+    });
+  } else if (ct === 7) {
+    _showConditionModal('Zone Level 条件を変更', buildLevelRangePicker(cond), async (data) => {
+      await _saveCondition(cond.EvaluationID, data);
+    });
+  } else if (ct === 8) {
+    _showConditionModal('Shade Group 条件を変更', buildIsNotPicker(cond, 'Open'), async (data) => {
+      await _saveCondition(cond.EvaluationID, data);
+    });
+  } else if (ct === 9) {
+    _showConditionModal('Timeclock 条件を変更', buildIsNotPicker(cond, 'Enabled'), async (data) => {
+      await _saveCondition(cond.EvaluationID, data);
+    });
+  } else if (ct === 10) {
+    const cd = await loadCondData();
+    _showConditionModal('Sequence 条件を変更', buildSequenceStepPicker(cond, cd, cond.FirstOperandObjectID), async (data) => {
+      await _saveCondition(cond.EvaluationID, data);
+    });
+  } else if (ct === 14) {
+    _showConditionModal('HVAC Zone 条件を変更', buildHvacTempPicker(cond), async (data) => {
+      await _saveCondition(cond.EvaluationID, data);
+    });
+  } else if (ct === 18) {
+    _showConditionModal('Device Lock State 条件を変更', buildLockStatePicker(cond), async (data) => {
       await _saveCondition(cond.EvaluationID, data);
     });
   } else {
@@ -1330,6 +1870,98 @@ function buildTimePicker(cond) {
   </div>`;
 }
 
+function buildOccupancyGroupPicker(cond) {
+  const ss = `width:100%;padding:4px;background:var(--surface2);color:var(--text);border:1px solid rgba(255,255,255,0.1);border-radius:4px`;
+  const opSel = `<select id="cond-op" style="margin-bottom:10px;${ss}">
+    <option value="3" ${cond.EvaluationOperator===3?'selected':''}>is (Equal)</option>
+    <option value="4" ${cond.EvaluationOperator===4?'selected':''}>is not (NotEqual)</option>
+  </select>`;
+  return `<div>
+    <div style="margin-bottom:6px;font-size:11px;color:var(--text-dim)">演算子</div>${opSel}
+    <div style="margin-bottom:6px;font-size:11px;color:var(--text-dim)">Scene #</div>
+    <input id="cond-occ-scene" type="number" value="${cond.SecondOperand ?? 0}" min="0" max="255" style="${ss}">
+  </div>`;
+}
+
+function buildBinaryStatePicker(cond, label0, label1, val0, val1) {
+  const ss = `width:100%;padding:4px;background:var(--surface2);color:var(--text);border:1px solid rgba(255,255,255,0.1);border-radius:4px`;
+  const opSel = `<select id="cond-op" style="margin-bottom:10px;${ss}">
+    <option value="3" ${cond.EvaluationOperator===3?'selected':''}>is (Equal)</option>
+    <option value="4" ${cond.EvaluationOperator===4?'selected':''}>is not (NotEqual)</option>
+  </select>`;
+  const stateSel = `<select id="cond-binary-state" style="${ss}">
+    <option value="${val0}" ${cond.SecondOperand==val0?'selected':''}>${label0}</option>
+    <option value="${val1}" ${cond.SecondOperand==val1?'selected':''}>${label1}</option>
+  </select>`;
+  return `<div>
+    <div style="margin-bottom:6px;font-size:11px;color:var(--text-dim)">演算子</div>${opSel}
+    <div style="margin-bottom:6px;font-size:11px;color:var(--text-dim)">状態</div>${stateSel}
+  </div>`;
+}
+
+function buildIsNotPicker(cond, stateLabel) {
+  const ss = `width:100%;padding:4px;background:var(--surface2);color:var(--text);border:1px solid rgba(255,255,255,0.1);border-radius:4px`;
+  return `<div>
+    <div style="margin-bottom:6px;font-size:11px;color:var(--text-dim)">演算子</div>
+    <select id="cond-op" style="${ss}">
+      <option value="3" ${cond.EvaluationOperator===3?'selected':''}>is ${stateLabel}</option>
+      <option value="4" ${cond.EvaluationOperator===4?'selected':''}>is not ${stateLabel}</option>
+    </select>
+  </div>`;
+}
+
+function buildLevelRangePicker(cond) {
+  const ss = `width:100%;padding:4px;background:var(--surface2);color:var(--text);border:1px solid rgba(255,255,255,0.1);border-radius:4px`;
+  return `<div>
+    <div style="margin-bottom:6px;font-size:11px;color:var(--text-dim)">From (%)</div>
+    <input id="cond-level-from" type="number" value="${cond.SecondOperand ?? 0}" min="0" max="100" style="margin-bottom:10px;${ss}">
+    <div style="margin-bottom:6px;font-size:11px;color:var(--text-dim)">To (%)</div>
+    <input id="cond-level-to" type="number" value="${cond.ThirdOperand ?? 100}" min="0" max="100" style="${ss}">
+  </div>`;
+}
+
+function buildHvacTempPicker(cond) {
+  const ss = `width:100%;padding:4px;background:var(--surface2);color:var(--text);border:1px solid rgba(255,255,255,0.1);border-radius:4px`;
+  const fromC = cond.SecondOperand ? ((cond.SecondOperand / 10 - 32) * 5 / 9).toFixed(0) : 18;
+  const toC   = cond.ThirdOperand  ? ((cond.ThirdOperand  / 10 - 32) * 5 / 9).toFixed(0) : 26;
+  return `<div>
+    <div style="margin-bottom:6px;font-size:11px;color:var(--text-dim)">From (°C)</div>
+    <input id="cond-hvac-from" type="number" value="${fromC}" min="-10" max="50" style="margin-bottom:10px;${ss}">
+    <div style="margin-bottom:6px;font-size:11px;color:var(--text-dim)">To (°C)</div>
+    <input id="cond-hvac-to" type="number" value="${toC}" min="-10" max="50" style="${ss}">
+  </div>`;
+}
+
+function buildSequenceStepPicker(cond, cd, sequenceId) {
+  const ss = `width:100%;padding:4px;background:var(--surface2);color:var(--text);border:1px solid rgba(255,255,255,0.1);border-radius:4px`;
+  const opSel = `<select id="cond-op" style="margin-bottom:10px;${ss}">
+    <option value="3" ${cond.EvaluationOperator===3?'selected':''}>is (Equal)</option>
+    <option value="4" ${cond.EvaluationOperator===4?'selected':''}>is not (NotEqual)</option>
+  </select>`;
+  // Find steps for this sequence (sequences in cd don't include steps — use number input fallback)
+  return `<div>
+    <div style="margin-bottom:6px;font-size:11px;color:var(--text-dim)">演算子</div>${opSel}
+    <div style="margin-bottom:6px;font-size:11px;color:var(--text-dim)">Step ID</div>
+    <input id="cond-seq-step" type="number" value="${cond.SecondOperand ?? 0}" min="0" style="${ss}">
+  </div>`;
+}
+
+function buildLockStatePicker(cond) {
+  const ss = `width:100%;padding:4px;background:var(--surface2);color:var(--text);border:1px solid rgba(255,255,255,0.1);border-radius:4px`;
+  const opSel = `<select id="cond-op" style="margin-bottom:10px;${ss}">
+    <option value="3" ${cond.EvaluationOperator===3?'selected':''}>is (Equal)</option>
+    <option value="4" ${cond.EvaluationOperator===4?'selected':''}>is not (NotEqual)</option>
+  </select>`;
+  return `<div>
+    <div style="margin-bottom:6px;font-size:11px;color:var(--text-dim)">演算子</div>${opSel}
+    <div style="margin-bottom:6px;font-size:11px;color:var(--text-dim)">Lock State</div>
+    <select id="cond-lock-state" style="${ss}">
+      <option value="2" ${cond.SecondOperand===2?'selected':''}>Locked</option>
+      <option value="1" ${cond.SecondOperand===1?'selected':''}>Unlocked</option>
+    </select>
+  </div>`;
+}
+
 let _condSaveCallback = null;
 
 function _showConditionModal(title, bodyHtml, onSave) {
@@ -1385,6 +2017,27 @@ function saveConditionEdit() {
     data.SecondOperand = encodeLutronTime(parseInt(timFrom.value), fromOff);
     data.ThirdOperand  = encodeLutronTime(parseInt(timTo.value),   toOff);
   }
+  const occScene = document.getElementById('cond-occ-scene');
+  if (occScene) data.SecondOperand = parseInt(occScene.value);
+  const binState = document.getElementById('cond-binary-state');
+  if (binState) data.SecondOperand = parseInt(binState.value);
+  const levelFrom = document.getElementById('cond-level-from');
+  const levelTo   = document.getElementById('cond-level-to');
+  if (levelFrom && levelTo) {
+    data.SecondOperand = parseInt(levelFrom.value);
+    data.ThirdOperand  = parseInt(levelTo.value);
+  }
+  const hvacFrom = document.getElementById('cond-hvac-from');
+  const hvacTo   = document.getElementById('cond-hvac-to');
+  if (hvacFrom && hvacTo) {
+    // Convert °C → Lutron (tenths of °F)
+    data.SecondOperand = Math.round((parseFloat(hvacFrom.value) * 9/5 + 32) * 10);
+    data.ThirdOperand  = Math.round((parseFloat(hvacTo.value)   * 9/5 + 32) * 10);
+  }
+  const seqStep = document.getElementById('cond-seq-step');
+  if (seqStep) data.SecondOperand = parseInt(seqStep.value);
+  const lockState = document.getElementById('cond-lock-state');
+  if (lockState) data.SecondOperand = parseInt(lockState.value);
   document.getElementById('cond-editor-overlay')?.remove();
   if (_condSaveCallback) { _condSaveCallback(data); _condSaveCallback = null; }
 }
@@ -1394,6 +2047,276 @@ async function _saveCondition(evalId, data) {
     method: 'PUT', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify(data),
   });
+  const d = await res.json();
+  if (d.error) { showToast('エラー: ' + d.error); return; }
+  await reloadPrograms();
+}
+
+// ── Add / Delete actions ──────────────────────
+
+function showAddMenu(event, triggerId, pmId, triggerType, insertAfterActionId = null) {
+  event.stopPropagation();
+  document.querySelectorAll('.add-action-menu').forEach(m => m.remove());
+  const menu = document.createElement('div');
+  menu.className = 'add-action-menu';
+  const items = [
+    {label: 'Run (シーン実行)',  fn: () => doAddRun(triggerId, pmId, triggerType, insertAfterActionId, null)},
+    {label: 'Delay',            fn: () => doAddDelay(triggerId, pmId, triggerType, insertAfterActionId, null)},
+    {label: 'If (条件分岐)',    fn: () => doAddIf(triggerId, pmId, triggerType, insertAfterActionId, null)},
+  ];
+  items.forEach(item => {
+    const div = document.createElement('div');
+    div.textContent = item.label;
+    div.onclick = () => { menu.remove(); item.fn(); };
+    menu.appendChild(div);
+  });
+  const rect = event.currentTarget.getBoundingClientRect();
+  menu.style.cssText = `top:${rect.bottom+2}px;left:${rect.left}px`;
+  document.body.appendChild(menu);
+  setTimeout(() => document.addEventListener('click', () => menu.remove(), {once:true}), 0);
+}
+
+function showInsertMenu(event, triggerId, actionId) {
+  event.stopPropagation();
+  document.querySelectorAll('.add-action-menu').forEach(m => m.remove());
+  const menu = document.createElement('div');
+  menu.className = 'add-action-menu';
+  const items = [
+    {label: '▲ Run を前に挿入',   fn: () => doAddRun(triggerId, null, null, null, actionId)},
+    {label: '▲ Delay を前に挿入', fn: () => doAddDelay(triggerId, null, null, null, actionId)},
+    {label: '▲ If を前に挿入',    fn: () => doAddIf(triggerId, null, null, null, actionId)},
+    {label: null},
+    {label: '▼ Run を後に挿入',   fn: () => doAddRun(triggerId, null, null, actionId, null)},
+    {label: '▼ Delay を後に挿入', fn: () => doAddDelay(triggerId, null, null, actionId, null)},
+    {label: '▼ If を後に挿入',    fn: () => doAddIf(triggerId, null, null, actionId, null)},
+  ];
+  items.forEach(item => {
+    if (!item.label) {
+      const sep = document.createElement('div');
+      sep.style.cssText = 'height:1px;background:rgba(255,255,255,0.1);margin:2px 0;pointer-events:none';
+      menu.appendChild(sep);
+      return;
+    }
+    const div = document.createElement('div');
+    div.textContent = item.label;
+    div.onclick = () => { menu.remove(); item.fn(); };
+    menu.appendChild(div);
+  });
+  menu.style.cssText = `top:${event.clientY}px;left:${event.clientX}px`;
+  document.body.appendChild(menu);
+  setTimeout(() => document.addEventListener('click', () => menu.remove(), {once:true}), 0);
+}
+
+async function _ensureTriggerId(triggerId, pmId, triggerType) {
+  if (triggerId) return triggerId;
+  // Create root trigger first
+  const res = await fetch(`/api/pm/${pmId}/add-trigger`, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({trigger_type: triggerType}),
+  });
+  const d = await res.json();
+  if (d.error) { showToast('エラー: ' + d.error); return null; }
+  return d.trigger_id;
+}
+
+function doAddRun(triggerId, pmId, triggerType, insertAfterActionId = null, insertBeforeActionId = null) {
+  showScenePicker('Run するシーンを選択', null, pmId, async (presetId) => {
+    if (presetId == null) return;
+    const tid = await _ensureTriggerId(triggerId, pmId, triggerType);
+    if (!tid) return;
+    const body = {type: 'run', preset_id: presetId};
+    if (insertAfterActionId != null) body.insert_after_action_id = insertAfterActionId;
+    if (insertBeforeActionId != null) body.insert_before_action_id = insertBeforeActionId;
+    const res = await fetch(`/api/trigger/${tid}/add-action`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    const d = await res.json();
+    if (d.error) { showToast('エラー: ' + d.error); return; }
+    await reloadPrograms();
+  });
+}
+
+function doAddDelay(triggerId, pmId, triggerType, insertAfterActionId = null, insertBeforeActionId = null) {
+  const overlay = document.createElement('div');
+  overlay.className = 'scene-picker-overlay';
+  overlay.id = 'delay-picker-overlay';
+  overlay.innerHTML = `
+    <div class="scene-picker-modal" onclick="event.stopPropagation()" style="max-width:300px">
+      <div class="scene-picker-header"><span>Delay を追加</span>
+        <button onclick="document.getElementById('delay-picker-overlay').remove()">✕</button></div>
+      <div style="padding:16px">
+        <div style="margin-bottom:8px;font-size:11px;color:var(--text-dim)">時間（最大4時間、1秒刻み）</div>
+        <div style="display:flex;gap:8px;align-items:center;font-size:12px">
+          <input id="dly-h" type="number" value="0" min="0" max="4"
+            style="width:52px;padding:4px;background:var(--surface2);color:var(--text);border:1px solid rgba(255,255,255,0.1);border-radius:4px;text-align:center"> h
+          <input id="dly-m" type="number" value="0" min="0" max="59"
+            style="width:52px;padding:4px;background:var(--surface2);color:var(--text);border:1px solid rgba(255,255,255,0.1);border-radius:4px;text-align:center"> m
+          <input id="dly-s" type="number" value="1" min="0" max="59"
+            style="width:52px;padding:4px;background:var(--surface2);color:var(--text);border:1px solid rgba(255,255,255,0.1);border-radius:4px;text-align:center"> s
+        </div>
+      </div>
+      <div class="scene-picker-footer">
+        <button class="btn btn-primary" style="font-size:11px;padding:4px 12px"
+          onclick="confirmAddDelay(${triggerId ?? 'null'},${pmId ?? 'null'},${triggerType ?? 'null'},${insertAfterActionId ?? 'null'},${insertBeforeActionId ?? 'null'})">追加</button>
+        <button class="btn" style="font-size:11px;padding:4px 10px;background:var(--surface2);color:var(--text-dim)"
+          onclick="document.getElementById('delay-picker-overlay').remove()">キャンセル</button>
+      </div>
+    </div>`;
+  overlay.addEventListener('click', () => overlay.remove());
+  document.body.appendChild(overlay);
+}
+
+async function confirmAddDelay(triggerId, pmId, triggerType, insertAfterActionId, insertBeforeActionId) {
+  const h = parseInt(document.getElementById('dly-h')?.value || 0);
+  const m = parseInt(document.getElementById('dly-m')?.value || 0);
+  const s = parseInt(document.getElementById('dly-s')?.value || 1);
+  const ms = Math.max(1000, Math.min((h*3600 + m*60 + s) * 1000, 14400000));
+  document.getElementById('delay-picker-overlay')?.remove();
+  const tid = await _ensureTriggerId(triggerId, pmId, triggerType);
+  if (!tid) return;
+  const body = {type: 'delay', delay_ms: ms};
+  if (insertAfterActionId != null) body.insert_after_action_id = insertAfterActionId;
+  if (insertBeforeActionId != null) body.insert_before_action_id = insertBeforeActionId;
+  const res = await fetch(`/api/trigger/${tid}/add-action`, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body),
+  });
+  const d = await res.json();
+  if (d.error) { showToast('エラー: ' + d.error); return; }
+  await reloadPrograms();
+}
+
+async function doAddIf(triggerId, pmId, triggerType, insertAfterActionId = null, insertBeforeActionId = null) {
+  const tid = await _ensureTriggerId(triggerId, pmId, triggerType);
+  if (!tid) return;
+  const body = {type: 'if'};
+  if (insertAfterActionId != null) body.insert_after_action_id = insertAfterActionId;
+  if (insertBeforeActionId != null) body.insert_before_action_id = insertBeforeActionId;
+  const res = await fetch(`/api/trigger/${tid}/add-action`, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body),
+  });
+  const d = await res.json();
+  if (d.error) { showToast('エラー: ' + d.error); return; }
+  await reloadPrograms();
+  showToast('If条件を追加しました。条件をクリックして編集してください。');
+}
+
+// ── AND/OR condition ─────────────────────────
+
+function showAddConditionMenu(event, actionId) {
+  document.querySelectorAll('.add-action-menu').forEach(m => m.remove());
+  const menu = document.createElement('div');
+  menu.className = 'add-action-menu';
+  [{label: 'and 条件を追加', op: 1}, {label: 'Or 条件を追加', op: 2}].forEach(item => {
+    const div = document.createElement('div');
+    div.textContent = item.label;
+    div.onclick = () => { menu.remove(); doAddCondition(actionId, item.op); };
+    menu.appendChild(div);
+  });
+  const rect = event.currentTarget.getBoundingClientRect();
+  menu.style.cssText = `top:${rect.bottom+2}px;left:${rect.left}px`;
+  document.body.appendChild(menu);
+  setTimeout(() => document.addEventListener('click', () => menu.remove(), {once:true}), 0);
+}
+
+async function doAddCondition(actionId, logicalOp) {
+  const res = await fetch(`/api/action/${actionId}/add-condition`, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({logical_operator: logicalOp}),
+  });
+  const d = await res.json();
+  if (d.error) { showToast('エラー: ' + d.error); return; }
+  await reloadPrograms();
+  showToast('条件を追加しました。クリックして編集してください。');
+}
+
+async function toggleConnector(evalId, el) {
+  if (!evalId) return;
+  const isAnd = (el.textContent.trim() === 'and');
+  const newOp = isAnd ? 2 : 1;
+  const res = await fetch(`/api/evaluation/${evalId}`, {
+    method: 'PUT', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({EvaluationOperator: newOp}),
+  });
+  const d = await res.json();
+  if (d.error) { showToast('エラー: ' + d.error); return; }
+  el.textContent = isAnd ? 'Or' : 'and';
+  markDirty();
+}
+
+// ── Drag-and-drop action reorder ─────────────
+
+let _dragActionId = null;
+let _dragTriggerId = null;
+
+function actionDragStart(event, el) {
+  _dragActionId = parseInt(el.dataset.actionId);
+  _dragTriggerId = parseInt(el.dataset.triggerId);
+  el.classList.add('dragging');
+  event.dataTransfer.effectAllowed = 'move';
+  event.dataTransfer.setData('text/plain', String(_dragActionId));
+}
+
+function actionDragOver(event, el) {
+  const elTriggerId = parseInt(el.dataset.triggerId);
+  const elActionId = parseInt(el.dataset.actionId);
+  if (elTriggerId !== _dragTriggerId || elActionId === _dragActionId) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = 'move';
+  const rect = el.getBoundingClientRect();
+  el.classList.remove('drag-over-top', 'drag-over-bottom');
+  el.classList.add(event.clientY < rect.top + rect.height / 2 ? 'drag-over-top' : 'drag-over-bottom');
+}
+
+function actionDragLeave(event, el) {
+  el.classList.remove('drag-over-top', 'drag-over-bottom');
+}
+
+function actionDragEnd(event, el) {
+  document.querySelectorAll('.prog-line').forEach(e =>
+    e.classList.remove('dragging', 'drag-over-top', 'drag-over-bottom'));
+  _dragActionId = null;
+  _dragTriggerId = null;
+}
+
+async function actionDrop(event, el) {
+  event.preventDefault();
+  el.classList.remove('drag-over-top', 'drag-over-bottom');
+  const targetId = parseInt(el.dataset.actionId);
+  const triggerId = parseInt(el.dataset.triggerId);
+  if (!_dragActionId || triggerId !== _dragTriggerId || targetId === _dragActionId) return;
+
+  // Collect ordered action IDs at this trigger level from DOM
+  const allEls = [...document.querySelectorAll(`.prog-line[data-trigger-id="${triggerId}"]`)];
+  const ordered = allEls.map(e => parseInt(e.dataset.actionId)).filter(id => !isNaN(id));
+  const without = ordered.filter(id => id !== _dragActionId);
+  const targetIdx = without.indexOf(targetId);
+  if (targetIdx === -1) return;
+  const rect = el.getBoundingClientRect();
+  const insertIdx = event.clientY < rect.top + rect.height / 2 ? targetIdx : targetIdx + 1;
+  without.splice(insertIdx, 0, _dragActionId);
+
+  const res = await fetch(`/api/trigger/${triggerId}/reorder`, {
+    method: 'PUT', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({action_ids_ordered: without}),
+  });
+  const d = await res.json();
+  if (d.error) { showToast('エラー: ' + d.error); return; }
+  await reloadPrograms();
+}
+
+async function addElseBranch(actionId) {
+  const res = await fetch(`/api/action/${actionId}/add-else`, {method: 'POST'});
+  const d = await res.json();
+  if (d.error) { showToast('エラー: ' + d.error); return; }
+  await reloadPrograms();
+}
+
+async function deleteAction(actionId) {
+  if (!confirm('このアクションを削除しますか？（If文の場合は中のアクションも削除されます）')) return;
+  const res = await fetch(`/api/action/${actionId}`, {method: 'DELETE'});
   const d = await res.json();
   if (d.error) { showToast('エラー: ' + d.error); return; }
   await reloadPrograms();
