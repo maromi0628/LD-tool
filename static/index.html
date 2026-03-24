@@ -108,12 +108,16 @@
   .prog-event-tabs { display: flex; gap: 0; margin-bottom: 8px; }
   .prog-event-tab { padding: 3px 10px; font-size: 10px; cursor: pointer; color: var(--text-dim); border: 1px solid var(--border); border-right: none; background: var(--surface); }
   .prog-event-tab:first-child { border-radius: 4px 0 0 4px; }
-  .prog-event-tab:last-child { border-right: 1px solid var(--border); border-radius: 0 4px 4px 0; }
+  .prog-event-tab:last-of-type { border-right: 1px solid var(--border); border-radius: 0 4px 4px 0; }
   .prog-event-tab.active { background: var(--accent2); color: #fff; border-color: var(--accent2); }
   .prog-event-tab.has-data { color: var(--text); }
   .prog-event-tab.active.has-data { color: #fff; }
   .prog-event-panel { display: none; }
   .prog-event-panel.active { display: block; }
+  .action-zone-row { display:flex; align-items:center; gap:6px; padding:3px 0; border-bottom:1px solid rgba(255,255,255,0.04); font-size:11px; }
+  .action-zone-row:last-child { border-bottom: none; }
+  .action-param-input { width:42px; background:var(--surface); border:1px solid var(--border); color:var(--text); border-radius:3px; padding:1px 4px; font-size:11px; text-align:right; }
+  .exec-type-sel { background:var(--surface); border:1px solid var(--border); color:var(--text-dim); border-radius:3px; padding:1px 2px; font-size:10px; cursor:pointer; }
   .prog-actions { font-family: monospace; font-size: 11px; line-height: 1.6; color: var(--text); }
   .prog-actions .prog-line { padding: 1px 0; }
   .prog-actions .prog-keyword { color: #c586c0; font-weight: 600; }
@@ -311,6 +315,7 @@
 let isPl = false;
 let isDirty = false;
 let currentAreaId = null;
+let currentAreaZones = [];  // zones for the current area (for Actions tab)
 let allTemplates = [];   // [{id, name}] from SQLite
 let fsTemplates = [];    // [filename] from filesystem
 let loadTypesCache = []; // [{LoadTypeID, Description, ControlType}]
@@ -457,6 +462,7 @@ async function loadDetail(areaId, areaName) {
   ]);
   if (!areaRes.ok) { detail.innerHTML = '<div class="loading">エラー</div>'; return; }
   const d = await areaRes.json();
+  currentAreaZones = d.zones || [];
   const prog = progRes.ok ? await progRes.json() : {};
 
   const tab = activeDetailTab;
@@ -791,6 +797,9 @@ function renderButtonProgramDetail(b, pm, presetNames, trigTrees) {
       id="${uid}-etab-${td.key}"
       onclick="switchEventTab('${uid}', ${td.key})">${td.label}</div>`;
   });
+  // Actions tab
+  html += `<div class="prog-event-tab" id="${uid}-etab-actions"
+    onclick="switchEventTab('${uid}', 'actions');loadActionsTab('${uid}', ${pmId})">Actions</div>`;
   html += `</div>`;
 
   // Build content panels
@@ -820,6 +829,11 @@ function renderButtonProgramDetail(b, pm, presetNames, trigTrees) {
     }
     html += `</div>`;
   });
+
+  // Actions panel (loaded lazily on tab click)
+  html += `<div class="prog-event-panel" id="${uid}-epanel-actions">
+    <div style="color:var(--text-dim);font-size:11px;padding:4px">「Actions」タブをクリックして読み込み</div>
+  </div>`;
 
   // Extra (unknown) event types shown generically below tabs
   if (extraTypes.length) {
@@ -1043,18 +1057,28 @@ function renderActionList(actions, presetNames, depth, pm, parentTriggerId) {
       html += `<div class="prog-line" style="padding-left:${pad}px"><span class="prog-keyword">End If</span></div>`;
 
     } else {
-      // Run / Stop action
+      // Run / Raise / Lower / Stop action
       const label = presetLabel(act.PresetId, presetNames);
-      const execType = act.ExecutionType === 1 ? 'Run' : 'Stop';
-      if (execType === 'Run' && act.ActionID) {
-        const pmId = pm ? pm.ProgrammingModelID : null;
-        html += `<div class="prog-line prog-line-run" style="padding-left:${pad}px"
-          onclick="editRunAction(${act.ActionID}, ${act.PresetId ?? 'null'}, ${pmId ?? 'null'})"${ctxMenu}${dragAttrs}>
-          <span style="color:var(--text-dim)">Run </span><span class="prog-action">${label}</span><span class="prog-edit-hint">✎</span>${addInlineBtn}${delBtn}
+      const execType = act.ExecutionType || 1;
+      const EXEC_LABELS = {1:'Run', 2:'Raise', 3:'Lower', 4:'Stop'};
+      const pmId = pm ? pm.ProgrammingModelID : null;
+      const execOpts = [1,2,3,4].map(v =>
+        `<option value="${v}"${execType==v?' selected':''}>${EXEC_LABELS[v]}</option>`).join('');
+      const execSel = act.ActionID
+        ? `<select class="exec-type-sel" title="実行タイプ"
+            onclick="event.stopPropagation()"
+            onchange="changeExecutionType(${act.ActionID},parseInt(this.value))">${execOpts}</select>`
+        : `<span style="color:var(--text-dim)">${EXEC_LABELS[execType]||'Run'} </span>`;
+      if (act.ActionID) {
+        html += `<div class="prog-line prog-line-run" style="padding-left:${pad}px"${ctxMenu}${dragAttrs}>
+          ${execSel}
+          <span class="prog-action" onclick="editRunAction(${act.ActionID},${act.PresetId??'null'},${pmId??'null'})">${label}</span>
+          <span class="prog-edit-hint" onclick="editRunAction(${act.ActionID},${act.PresetId??'null'},${pmId??'null'})">✎</span>
+          ${addInlineBtn}${delBtn}
         </div>`;
       } else {
         html += `<div class="prog-line" style="padding-left:${pad}px"${ctxMenu}${dragAttrs}>
-          <span style="color:var(--text-dim)">${execType} </span><span class="prog-action">${label}</span>${addInlineBtn}${delBtn}</div>`;
+          <span style="color:var(--text-dim)">${EXEC_LABELS[execType]||'Run'} </span><span class="prog-action">${label}</span>${addInlineBtn}${delBtn}</div>`;
       }
     }
   });
@@ -2650,6 +2674,145 @@ async function saveFile() {
   const db = document.getElementById('dirty-badge');
   if (db) db.remove();
   toast('保存しました ✓');
+}
+
+// ── Actions tab ──────────────────────────────
+
+async function loadActionsTab(uid, pmId) {
+  const panel = document.getElementById(`${uid}-epanel-actions`);
+  if (!panel) return;
+  panel.innerHTML = '<div style="color:var(--text-dim);font-size:11px;padding:4px">読み込み中...</div>';
+  const res = await fetch(`/api/pm/${pmId}/actions`);
+  if (!res.ok) { panel.innerHTML = '<div style="color:red">エラー</div>'; return; }
+  const actions = await res.json();
+  _renderActionsPanel(uid, pmId, actions, actions.length ? actions[0].PresetID : null);
+}
+
+function _renderActionsPanel(uid, pmId, actions, selPresetId) {
+  const panel = document.getElementById(`${uid}-epanel-actions`);
+  if (!panel) return;
+  const sel = selPresetId || (actions.length ? actions[0].PresetID : null);
+  const opts = actions.map(a =>
+    `<option value="${a.PresetID}"${a.PresetID==sel?' selected':''}>${a.Name}</option>`).join('');
+  let html = `<div style="display:flex;gap:4px;align-items:center;margin-bottom:8px;flex-wrap:wrap">`;
+  if (actions.length) {
+    html += `<select id="${uid}-action-sel" style="flex:1;min-width:100px"
+      onchange="_loadActionZones('${uid}',${pmId},parseInt(this.value))">${opts}</select>`;
+    html += `<button class="prog-del-btn" title="アクションを削除"
+      onclick="_deleteAction('${uid}',${pmId})">✕</button>`;
+  } else {
+    html += `<span style="color:var(--text-dim);font-size:11px">アクションなし</span>`;
+  }
+  html += `<button class="prog-add-btn" title="アクションを追加"
+    onclick="_addAction('${uid}',${pmId})">＋</button>`;
+  html += `</div>`;
+  html += `<div id="${uid}-action-zones"></div>`;
+  panel.innerHTML = html;
+  if (sel) _loadActionZones(uid, pmId, sel);
+}
+
+async function _loadActionZones(uid, pmId, presetId) {
+  const container = document.getElementById(`${uid}-action-zones`);
+  if (!container) return;
+  const res = await fetch(`/api/preset/${presetId}/assignments`);
+  if (!res.ok) { container.innerHTML = '<div style="color:red">エラー</div>'; return; }
+  const assignments = await res.json();
+  const zoneAssns = assignments.filter(a => a.AssignableObjectType === 198);
+  const assignedIds = new Set(zoneAssns.map(a => a.AssignableObjectID));
+
+  let html = '';
+  if (zoneAssns.length) {
+    html += '<div style="margin-bottom:6px">';
+    zoneAssns.forEach(a => {
+      html += `<div class="action-zone-row">
+        <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">🔆 ${a.ZoneName||a.AssignableObjectID}</span>
+        <label style="color:var(--text-dim)">Fade</label>
+        <input type="number" class="action-param-input" min="0" max="3600" value="${a.fade||0}"
+          onchange="_updateZoneParam(${a.PresetAssignmentID},'fade',this.value)">
+        <span style="color:var(--text-dim)">s</span>
+        <label style="color:var(--text-dim)">Delay</label>
+        <input type="number" class="action-param-input" min="0" max="3600" value="${a.delay||0}"
+          onchange="_updateZoneParam(${a.PresetAssignmentID},'delay',this.value)">
+        <span style="color:var(--text-dim)">s</span>
+        <button class="prog-del-btn"
+          onclick="_removeZone(${a.PresetAssignmentID},'${uid}',${pmId},${presetId})">✕</button>
+      </div>`;
+    });
+    html += '</div>';
+  } else {
+    html += '<div style="color:var(--text-dim);font-size:11px;padding:2px 0 6px">ゾーン未割り当て</div>';
+  }
+
+  const available = currentAreaZones.filter(z => !assignedIds.has(z.ZoneID));
+  if (available.length) {
+    const zOpts = available.map(z => `<option value="${z.ZoneID}">${z.Name}</option>`).join('');
+    html += `<div style="display:flex;gap:4px;align-items:center;margin-top:4px">
+      <select id="${uid}-zone-add-sel" style="flex:1;font-size:11px">${zOpts}</select>
+      <button class="prog-add-btn" onclick="_addZone('${uid}',${pmId},${presetId})">＋ ゾーンを追加</button>
+    </div>`;
+  }
+  container.innerHTML = html;
+}
+
+async function _addAction(uid, pmId) {
+  const res = await fetch(`/api/pm/${pmId}/actions`, {method:'POST'});
+  const data = await res.json();
+  if (!res.ok) { toast(data.error||'エラー','red'); return; }
+  markDirty();
+  const r2 = await fetch(`/api/pm/${pmId}/actions`);
+  const actions = await r2.json();
+  _renderActionsPanel(uid, pmId, actions, data.preset_id);
+}
+
+async function _deleteAction(uid, pmId) {
+  const sel = document.getElementById(`${uid}-action-sel`);
+  if (!sel) { toast('アクションなし'); return; }
+  const presetId = parseInt(sel.value);
+  if (!confirm('このアクションを削除しますか？')) return;
+  const res = await fetch(`/api/preset/${presetId}`, {method:'DELETE'});
+  if (!res.ok) { const d=await res.json(); toast(d.error||'エラー','red'); return; }
+  markDirty();
+  const r2 = await fetch(`/api/pm/${pmId}/actions`);
+  const actions = await r2.json();
+  _renderActionsPanel(uid, pmId, actions, null);
+}
+
+async function _addZone(uid, pmId, presetId) {
+  const sel = document.getElementById(`${uid}-zone-add-sel`);
+  if (!sel) return;
+  const zoneId = parseInt(sel.value);
+  const res = await fetch(`/api/preset/${presetId}/assignments`, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({zone_id: zoneId, fade:0, delay:0, level:10000})
+  });
+  const data = await res.json();
+  if (!res.ok) { toast(data.error||'エラー','red'); return; }
+  markDirty();
+  _loadActionZones(uid, pmId, presetId);
+}
+
+async function _removeZone(assignmentId, uid, pmId, presetId) {
+  const res = await fetch(`/api/assignment/${assignmentId}`, {method:'DELETE'});
+  if (!res.ok) { const d=await res.json(); toast(d.error||'エラー','red'); return; }
+  markDirty();
+  _loadActionZones(uid, pmId, presetId);
+}
+
+async function _updateZoneParam(assignmentId, field, value) {
+  const body = {}; body[field] = parseInt(value)||0;
+  await fetch(`/api/assignment/${assignmentId}`, {
+    method:'PATCH', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(body)
+  });
+  markDirty();
+}
+
+async function changeExecutionType(actionId, execType) {
+  await fetch(`/api/action/${actionId}/execution-type`, {
+    method:'PATCH', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({execution_type: execType})
+  });
+  markDirty();
 }
 
 // ── Toast ────────────────────────────────────

@@ -11,7 +11,6 @@ import shutil
 import tempfile
 import threading
 import webbrowser
-import subprocess
 import tkinter as tk
 from tkinter import filedialog
 from flask import Flask, jsonify, request, send_from_directory
@@ -35,6 +34,46 @@ state = {
 }
 
 SQL_INSTANCE = r".\LUTRON2022"
+
+
+def _run_sql_admin(sql, timeout=120):
+    """Run a DDL statement (RESTORE/BACKUP/DROP) against master with autocommit."""
+    conn = None
+    for drv in ["ODBC Driver 17 for SQL Server", "SQL Server Native Client 11.0", "SQL Server"]:
+        try:
+            conn = pyodbc.connect(
+                f"DRIVER={{{drv}}};SERVER={SQL_INSTANCE};DATABASE=master;Trusted_Connection=yes;",
+                autocommit=True,
+                timeout=30,
+            )
+            break
+        except pyodbc.Error:
+            continue
+    if conn is None:
+        raise RuntimeError("SQL Server に接続できません")
+    conn.timeout = timeout
+    cur = conn.cursor()
+    try:
+        cur.execute(sql)
+    except pyodbc.Error as e:
+        sqlstate = str(e.args[0]) if e.args else ""
+        if not sqlstate.startswith("01"):
+            conn.close()
+            raise RuntimeError(str(e))
+    # Consume all remaining result sets (RESTORE/BACKUP sends multiple info messages).
+    # This ensures SQL Server finishes before we close the connection.
+    while True:
+        try:
+            if not cur.nextset():
+                break
+        except pyodbc.Error as e:
+            sqlstate = str(e.args[0]) if e.args else ""
+            if not sqlstate.startswith("01"):
+                conn.close()
+                raise RuntimeError(str(e))
+        except StopIteration:
+            break
+    conn.close()
 
 
 # ─────────────────────────────────────────────
@@ -151,8 +190,7 @@ def drop_db(db_name):
             f"ALTER DATABASE [{db_name}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; "
             f"DROP DATABASE [{db_name}]; END"
         )
-        subprocess.run(["sqlcmd", "-S", SQL_INSTANCE, "-Q", drop_sql],
-                       capture_output=True, timeout=30)
+        _run_sql_admin(drop_sql, timeout=30)
     except Exception:
         pass
     lut_dest = os.path.join(r"C:\ProgramData\Lutron", f"{db_name}.lut")
@@ -173,8 +211,10 @@ def restore_lut(lut_path, db_name):
         f"ALTER DATABASE [{db_name}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; "
         f"DROP DATABASE [{db_name}]; END"
     )
-    subprocess.run(["sqlcmd", "-S", SQL_INSTANCE, "-Q", drop_sql],
-                   capture_output=True, timeout=30)
+    try:
+        _run_sql_admin(drop_sql, timeout=30)
+    except Exception:
+        pass
 
     if os.path.exists(lut_dest):
         try:
@@ -188,12 +228,9 @@ def restore_lut(lut_path, db_name):
     sql = (
         f"RESTORE DATABASE [{db_name}] FROM DISK = N'{lut_dest}' WITH "
         f"MOVE N'Project' TO N'{mdf}', "
-        f"MOVE N'Project_log' TO N'{ldf}', RECOVERY"
+        f"MOVE N'Project_log' TO N'{ldf}', RECOVERY, REPLACE"
     )
-    result = subprocess.run(["sqlcmd", "-S", SQL_INSTANCE, "-Q", sql],
-                            capture_output=True, text=True, timeout=120)
-    if result.returncode != 0:
-        raise RuntimeError(result.stdout or result.stderr)
+    _run_sql_admin(sql, timeout=120)
 
 
 # ─────────────────────────────────────────────
@@ -291,10 +328,7 @@ def load_project(work_dir, template_id=None):
 def backup_lut_from_db(db_name, dest_lut_path):
     """Backup the current SQL Server DB back to a .lut file."""
     sql = f"BACKUP DATABASE [{db_name}] TO DISK = N'{dest_lut_path}' WITH FORMAT, INIT"
-    result = subprocess.run(["sqlcmd", "-S", SQL_INSTANCE, "-Q", sql],
-                            capture_output=True, text=True, timeout=120)
-    if result.returncode != 0:
-        raise RuntimeError(result.stdout or result.stderr)
+    _run_sql_admin(sql, timeout=120)
 
 
 def save_back_to_pl():
@@ -2111,6 +2145,199 @@ def update_pm(pm_id):
             f"UPDATE tblProgrammingModel SET {sets}, NeedsTransfer = 1 WHERE ProgrammingModelID = ?",
             vals
         )
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ── Button-local Actions (tblPreset PresetType=1) ─────────────────────────────
+
+@app.route("/api/pm/<int:pm_id>/actions", methods=["GET"])
+def list_pm_actions(pm_id):
+    """List button-local action presets for a ProgrammingModel."""
+    if not state["db_name"]:
+        return jsonify({"error": "DB未接続"}), 400
+    rows = q("""
+        SELECT PresetID, Name, SortOrder
+        FROM tblPreset
+        WHERE PresetType = 1 AND ParentType = 231 AND ParentID = ?
+        ORDER BY SortOrder, Name
+    """, (pm_id,))
+    return jsonify(rows)
+
+
+@app.route("/api/pm/<int:pm_id>/actions", methods=["POST"])
+def create_pm_action(pm_id):
+    """Create a new button-local action preset."""
+    if not state["db_name"]:
+        return jsonify({"error": "DB未接続"}), 400
+    existing = q("""
+        SELECT ISNULL(MAX(SortOrder), 0) AS max_sort
+        FROM tblPreset
+        WHERE PresetType = 1 AND ParentType = 231 AND ParentID = ?
+    """, (pm_id,))
+    next_sort = (existing[0]["max_sort"] or 0) + 1
+    name = f"Action {next_sort:03d}"
+    try:
+        preset_id = _alloc_and_insert("tblPreset", "PresetID", {
+            "Name": name, "DatabaseRevision": 0, "SortOrder": next_sort,
+            "ParentID": pm_id, "ParentType": 231,
+            "NeedsTransfer": 1, "PresetType": 1,
+            "WhereUsedId": 2147483647, "IsGPDPreset": 0,
+        })
+        return jsonify({"preset_id": preset_id, "name": name, "sort_order": next_sort})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/preset/<int:preset_id>", methods=["PATCH"])
+def update_preset(preset_id):
+    """Rename a button-local action preset."""
+    if not state["db_name"]:
+        return jsonify({"error": "DB未接続"}), 400
+    name = (request.json or {}).get("name", "").strip()
+    if not name:
+        return jsonify({"error": "名前を入力してください"}), 400
+    try:
+        execute_sql("UPDATE tblPreset SET Name = ? WHERE PresetID = ? AND PresetType = 1",
+                    (name, preset_id))
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/preset/<int:preset_id>", methods=["DELETE"])
+def delete_preset(preset_id):
+    """Delete a button-local action preset and all its assignments."""
+    if not state["db_name"]:
+        return jsonify({"error": "DB未接続"}), 400
+    try:
+        assignments = q("SELECT PresetAssignmentID FROM tblPresetAssignment WHERE ParentID = ?",
+                        (preset_id,))
+        for a in assignments:
+            execute_sql("DELETE FROM tblAssignmentCommandParameter WHERE ParentId = ?",
+                        (a["PresetAssignmentID"],))
+        execute_sql("DELETE FROM tblPresetAssignment WHERE ParentID = ?", (preset_id,))
+        for col in ("PressPresetID", "ReleasePresetID", "HoldPresetId",
+                    "DoubleTapPresetID", "PresetID", "ReferencePresetIDForLed"):
+            execute_sql(f"UPDATE tblProgrammingModel SET [{col}] = NULL WHERE [{col}] = ?",
+                        (preset_id,))
+        execute_sql("UPDATE tblAction SET PresetId = 0 WHERE PresetId = ?", (preset_id,))
+        execute_sql("DELETE FROM tblPreset WHERE PresetID = ? AND PresetType = 1", (preset_id,))
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ── Zone assignments for action presets ───────────────────────────────────────
+
+@app.route("/api/preset/<int:preset_id>/assignments", methods=["GET"])
+def list_preset_assignments(preset_id):
+    """List zone assignments for an action preset."""
+    if not state["db_name"]:
+        return jsonify({"error": "DB未接続"}), 400
+    assignments = q("""
+        SELECT pa.PresetAssignmentID, pa.AssignableObjectID, pa.AssignableObjectType,
+               pa.AssignmentCommandType, pa.SortOrder,
+               z.Name AS ZoneName
+        FROM tblPresetAssignment pa
+        LEFT JOIN tblZone z ON pa.AssignableObjectID = z.ZoneID AND pa.AssignableObjectType = 198
+        WHERE pa.ParentID = ?
+        ORDER BY pa.SortOrder
+    """, (preset_id,))
+    for a in assignments:
+        params = q("""
+            SELECT ParameterType, ParameterValue
+            FROM tblAssignmentCommandParameter WHERE ParentId = ? ORDER BY SortOrder
+        """, (a["PresetAssignmentID"],))
+        pm = {p["ParameterType"]: p["ParameterValue"] for p in params}
+        a["fade"]  = pm.get(1, 0)
+        a["delay"] = pm.get(2, 0)
+        a["level"] = pm.get(17, 10000)
+    return jsonify(assignments)
+
+
+@app.route("/api/preset/<int:preset_id>/assignments", methods=["POST"])
+def add_preset_assignment(preset_id):
+    """Add a zone to an action preset."""
+    if not state["db_name"]:
+        return jsonify({"error": "DB未接続"}), 400
+    data = request.json or {}
+    zone_id = data.get("zone_id")
+    if zone_id is None:
+        return jsonify({"error": "zone_id が必要です"}), 400
+    existing = q("""SELECT PresetAssignmentID FROM tblPresetAssignment
+                    WHERE ParentID = ? AND AssignableObjectID = ? AND AssignableObjectType = 198""",
+                 (preset_id, zone_id))
+    if existing:
+        return jsonify({"error": "このゾーンはすでに割り当て済みです"}), 400
+    try:
+        sort = q("SELECT ISNULL(MAX(SortOrder), -1) + 1 AS s FROM tblPresetAssignment WHERE ParentID = ?",
+                 (preset_id,))[0]["s"]
+        aid = _alloc_and_insert("tblPresetAssignment", "PresetAssignmentID", {
+            "Name": "", "DatabaseRevision": 0, "SortOrder": sort,
+            "ParentID": preset_id, "ParentType": 43,
+            "AssignableObjectID": zone_id, "AssignableObjectType": 198,
+            "AssignmentCommandType": 16, "NeedsTransfer": 1,
+            "AssignmentCommandGroup": 12, "WhereUsedId": 2147483647,
+        })
+        fade  = int(data.get("fade",  0))
+        delay = int(data.get("delay", 0))
+        level = int(data.get("level", 10000))
+        for sort_p, ptype, pval in [(0, 1, fade), (1, 2, delay), (2, 17, level)]:
+            execute_sql(
+                "INSERT INTO tblAssignmentCommandParameter (SortOrder,ParentId,ParameterType,ParameterValue) VALUES (?,?,?,?)",
+                (sort_p, aid, ptype, pval))
+        return jsonify({"assignment_id": aid})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/assignment/<int:assignment_id>", methods=["PATCH"])
+def update_assignment(assignment_id):
+    """Update fade/delay/level for a zone assignment."""
+    if not state["db_name"]:
+        return jsonify({"error": "DB未接続"}), 400
+    data = request.json or {}
+    mapping = {}
+    if "fade"  in data: mapping[1]  = int(data["fade"])
+    if "delay" in data: mapping[2]  = int(data["delay"])
+    if "level" in data: mapping[17] = int(data["level"])
+    try:
+        for ptype, pval in mapping.items():
+            execute_sql(
+                "UPDATE tblAssignmentCommandParameter SET ParameterValue = ? WHERE ParentId = ? AND ParameterType = ?",
+                (pval, assignment_id, ptype))
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/assignment/<int:assignment_id>", methods=["DELETE"])
+def delete_assignment(assignment_id):
+    """Delete a zone assignment from an action preset."""
+    if not state["db_name"]:
+        return jsonify({"error": "DB未接続"}), 400
+    try:
+        execute_sql("DELETE FROM tblAssignmentCommandParameter WHERE ParentId = ?", (assignment_id,))
+        execute_sql("DELETE FROM tblPresetAssignment WHERE PresetAssignmentID = ?", (assignment_id,))
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/action/<int:action_id>/execution-type", methods=["PATCH"])
+def update_action_execution_type(action_id):
+    """Update ExecutionType for a Run action (1=Activate,2=Raise,3=Lower,4=Stop)."""
+    if not state["db_name"]:
+        return jsonify({"error": "DB未接続"}), 400
+    exec_type = (request.json or {}).get("execution_type")
+    if exec_type not in (1, 2, 3, 4):
+        return jsonify({"error": "無効なexecution_type"}), 400
+    try:
+        execute_sql(
+            "UPDATE tblAction SET ExecutionType = ? WHERE ActionID = ? AND ObjectType = 234",
+            (exec_type, action_id))
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
