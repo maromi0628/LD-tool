@@ -1820,7 +1820,7 @@ def cond_data():
 
     # CCO zones — zones with SwitchLeg LoadType 25 (Maintained) or 26 (Pulsed)
     cco = q("""
-        SELECT z.ZoneID, z.Name AS ZoneName,
+        SELECT z.ZoneID, z.Name AS ZoneName, z.ControlType, sl.LoadType,
                a.AreaID, a.Name AS AreaName, pa.Name AS ParentAreaName
         FROM tblZone z
         JOIN tblSwitchLeg sl ON sl.SwitchLegID = z.ZoneID + 1
@@ -1841,7 +1841,7 @@ def cond_data():
 
     # Lighting zones — ObjectType=15 zones excluding CCO (LoadType 25/26)
     zones = q("""
-        SELECT z.ZoneID, z.Name AS ZoneName,
+        SELECT z.ZoneID, z.Name AS ZoneName, z.ControlType,
                a.AreaID, a.Name AS AreaName, pa.Name AS ParentAreaName
         FROM tblZone z
         LEFT JOIN tblSwitchLeg sl ON sl.SwitchLegID = z.ZoneID + 1
@@ -1850,6 +1850,35 @@ def cond_data():
         WHERE z.ObjectType = 15
           AND (sl.LoadType IS NULL OR sl.LoadType NOT IN (25, 26))
         ORDER BY pa.Name, a.Name, z.Name
+    """)
+
+    # Rentable spaces (hotel room properties)
+    rooms = q("""
+        SELECT rs.RentableSpaceID, rs.Name AS RoomName
+        FROM tblRentableSpace rs
+        ORDER BY rs.Name
+    """)
+
+    # Integration command sets (Ethernet Devices, ObjType=202)
+    integrations = q("""
+        SELECT ics.IntegrationCommandSetID, ics.Name AS CommandName,
+               ip.Name AS PortName,
+               a.Name AS AreaName, pa.Name AS ParentAreaName
+        FROM tblIntegrationCommandSet ics
+        JOIN tblIntegrationPort ip ON ics.ParentIntegrationPortID = ip.IntegrationPortID
+        LEFT JOIN tblIntegrationPortAreaAssn ipaa ON ipaa.IntegrationPortID = ip.IntegrationPortID
+        LEFT JOIN tblArea a  ON ipaa.AreaID = a.AreaID
+        LEFT JOIN tblArea pa ON a.ParentID = pa.AreaID
+        ORDER BY ip.Name, ics.Name
+    """)
+
+    # Shade groups
+    shades = q("""
+        SELECT sg.ShadeGroupID, sg.Name AS ShadeName,
+               a.Name AS AreaName
+        FROM tblShadeGroup sg
+        LEFT JOIN tblArea a ON sg.ParentAreaID = a.AreaID
+        ORDER BY a.Name, sg.Name
     """)
 
     # Sequences
@@ -1909,10 +1938,13 @@ def cond_data():
         "cco": cco,
         "areas": areas,
         "zones": zones,
+        "shades": shades,
         "sequences": sequences,
         "timeclocks": timeclocks,
         "hvac": hvac,
         "devices": devices,
+        "rooms": rooms,
+        "integrations": integrations,
         "_errors": errors if errors else None,
     })
 
@@ -2041,6 +2073,26 @@ def cond_debug():
             FROM tblDoor d
             LEFT JOIN tblSensorConnection sc
                    ON sc.SensorConnectionID = d.AssociatedCCISensorConnectionID
+        """),
+        # Assignment command types by object type — to discover cmd types for timeclock/occupancy/room props
+        "assignment_cmd_types": q("""
+            SELECT pa.AssignableObjectType, pa.AssignmentCommandType,
+                   pa.AssignmentCommandGroup, COUNT(*) as cnt,
+                   MIN(pa.AssignableObjectID) as sample_id
+            FROM tblPresetAssignment pa
+            GROUP BY pa.AssignableObjectType, pa.AssignmentCommandType, pa.AssignmentCommandGroup
+            ORDER BY pa.AssignableObjectType, cnt DESC
+        """),
+        # Assignment params for timeclock (ObjType=19), occupancy (ObjType=38), room props (ObjType=400)
+        "target_assignments": q("""
+            SELECT TOP 20 pa.PresetAssignmentID, pa.AssignableObjectType,
+                   pa.AssignableObjectID, pa.AssignmentCommandType,
+                   pa.AssignmentCommandGroup,
+                   acp.ParameterType, acp.ParameterValue, acp.SortOrder
+            FROM tblPresetAssignment pa
+            LEFT JOIN tblAssignmentCommandParameter acp ON acp.ParentId = pa.PresetAssignmentID
+            WHERE pa.AssignableObjectType IN (19, 38, 400)
+            ORDER BY pa.AssignableObjectType, pa.PresetAssignmentID, acp.SortOrder
         """),
     })
 
@@ -2229,62 +2281,436 @@ def delete_preset(preset_id):
         return jsonify({"error": str(e)}), 500
 
 
-# ── Zone assignments for action presets ───────────────────────────────────────
+# ── Assignable items list ──────────────────────────────────────────────────────
+
+@app.route("/api/assignable-items", methods=["GET"])
+def get_assignable_items():
+    """Get list of assignable items by type."""
+    if not state["db_name"]:
+        return jsonify({"error": "DB未接続"}), 400
+    item_type = request.args.get("type", "zone")
+
+    if item_type == "zone":
+        # Lighting zones: ObjectType=15, excluding CCO (LoadType 25/26)
+        return jsonify(q("""
+            SELECT z.ZoneID, z.Name, z.ControlType,
+                   a.Name AS AreaName, pa.Name AS ParentAreaName
+            FROM tblZone z
+            LEFT JOIN tblSwitchLeg sl ON sl.SwitchLegID = z.ZoneID + 1
+            JOIN tblArea a  ON z.ParentID = a.AreaID
+            LEFT JOIN tblArea pa ON a.ParentID = pa.AreaID
+            WHERE z.ObjectType = 15
+              AND (sl.LoadType IS NULL OR sl.LoadType NOT IN (25, 26))
+            ORDER BY pa.Name, a.Name, z.Name
+        """))
+
+    elif item_type == "cco":
+        # Contact Closure Output zones (LoadType 25=Maintained, 26=Pulsed)
+        return jsonify(q("""
+            SELECT z.ZoneID, z.Name, z.ControlType, sl.LoadType,
+                   a.Name AS AreaName, pa.Name AS ParentAreaName
+            FROM tblZone z
+            JOIN tblSwitchLeg sl ON sl.SwitchLegID = z.ZoneID + 1
+            JOIN tblArea a  ON z.ParentID = a.AreaID
+            LEFT JOIN tblArea pa ON a.ParentID = pa.AreaID
+            WHERE sl.LoadType IN (25, 26)
+            ORDER BY pa.Name, a.Name, z.Name
+        """))
+
+    elif item_type == "shade":
+        return jsonify(q("""
+            SELECT sg.ShadeGroupID, sg.Name,
+                   a.Name AS AreaName
+            FROM tblShadeGroup sg
+            LEFT JOIN tblArea a ON sg.ParentAreaID = a.AreaID
+            ORDER BY a.Name, sg.Name
+        """))
+
+    elif item_type == "device":
+        return jsonify(q("""
+            SELECT csd.ControlStationDeviceID, csd.Name AS DeviceName,
+                   cs.Name AS StationName,
+                   a.Name AS AreaName, pa.Name AS ParentAreaName
+            FROM tblControlStationDevice csd
+            JOIN tblControlStation cs ON csd.ParentControlStationID = cs.ControlStationID
+            LEFT JOIN tblArea a  ON cs.ParentID = a.AreaID
+            LEFT JOIN tblArea pa ON a.ParentID = pa.AreaID
+            ORDER BY pa.Name, a.Name, cs.Name
+        """))
+
+    elif item_type == "variable":
+        vars_ = q("SELECT VariableID, Name FROM tblVariable ORDER BY Name")
+        for v in vars_:
+            v["states"] = q(
+                "SELECT VariableStateID, Name FROM tblVariableState WHERE ParentID = ? ORDER BY SortOrder",
+                (v["VariableID"],))
+        return jsonify(vars_)
+
+    elif item_type == "sequence":
+        return jsonify(q("""
+            SELECT s.SequenceID, s.Name,
+                   a.Name AS AreaName
+            FROM tblSequence s
+            LEFT JOIN tblArea a ON s.ParentID = a.AreaID AND s.ParentType = 2
+            ORDER BY s.Name
+        """))
+
+    elif item_type == "hvac":
+        return jsonify(q("""
+            SELECT h.ZoneID, z.Name,
+                   a.Name AS AreaName, pa.Name AS ParentAreaName
+            FROM tblZoneHVAC h
+            JOIN tblZone z ON z.ZoneID = h.ZoneID
+            JOIN tblArea a ON z.ParentID = a.AreaID
+            LEFT JOIN tblArea pa ON a.ParentID = pa.AreaID
+            ORDER BY pa.Name, a.Name, z.Name
+        """))
+
+    else:
+        return jsonify({"error": "不明なタイプ"}), 400
+
+
+# Helper: ControlType → (AssignmentCommandType, AssignmentCommandGroup, level_param_type)
+# ControlType: 1=Dimmer, 2=Switched, 5=Shade, 6=Fan, 7=CCO Maintained, 8=CCO Pulsed
+_ZONE_CMD_MAP = {
+    1: (2,  1, 3),   # Dimmer:       CmdType=2, CmdGroup=1, level=ParamType 3 (0–100)
+    2: (2,  1, 3),   # Switched:     same, level is 0 or 100
+    5: (2,  1, 3),   # Shade zone:   treated like dimmer
+    6: (2,  1, 3),   # Fan:          treated like dimmer
+    7: (18, 7, 18),  # CCO Maintained: CmdType=18, CmdGroup=7, level=ParamType 18 (0/100)
+    8: (12, 8, None),# CCO Pulsed:   CmdType=12, CmdGroup=8, no level param
+}
+
+
+# ── Assignments for action presets ─────────────────────────────────────────────
 
 @app.route("/api/preset/<int:preset_id>/assignments", methods=["GET"])
 def list_preset_assignments(preset_id):
-    """List zone assignments for an action preset."""
+    """List all assignments for an action preset."""
     if not state["db_name"]:
         return jsonify({"error": "DB未接続"}), 400
     assignments = q("""
         SELECT pa.PresetAssignmentID, pa.AssignableObjectID, pa.AssignableObjectType,
                pa.AssignmentCommandType, pa.SortOrder,
-               z.Name AS ZoneName
+               -- Zone (ObjType=198 legacy or ObjType=15 direct)
+               z198.Name  AS ZoneName198,  z198.ControlType AS CtrlType198,
+               z15.Name   AS ZoneName15,   z15.ControlType  AS CtrlType15,
+               -- Area (ObjType=2)
+               ar.Name    AS AreaName,
+               -- Timeclock (ObjType=19)
+               tc.Name    AS TimeclockName,
+               -- OccupancyGroup (ObjType=38)
+               og.Name    AS OccupancyName,
+               -- RentableSpace (ObjType=400)
+               rs.Name    AS RoomPropName,
+               -- IntegrationCommandSet (ObjType=202)
+               ics.Name   AS IntegrationName,
+               -- Sequence
+               seq.Name   AS SeqName,
+               -- Variable
+               var.Name   AS VarName,
+               -- HVAC (via ZoneID=211 in tblZone joined through tblZoneHVAC)
+               hz.Name    AS HvacName,
+               -- Shade Group
+               sg.Name    AS ShadeName,
+               -- Device (control station device name)
+               cs.Name    AS DeviceName
         FROM tblPresetAssignment pa
-        LEFT JOIN tblZone z ON pa.AssignableObjectID = z.ZoneID AND pa.AssignableObjectType = 198
+        LEFT JOIN tblZone z198    ON pa.AssignableObjectID = z198.ZoneID
+                                 AND pa.AssignableObjectType = 198
+        LEFT JOIN tblZone z15     ON pa.AssignableObjectID = z15.ZoneID
+                                 AND pa.AssignableObjectType = 15
+        LEFT JOIN tblArea ar         ON pa.AssignableObjectID = ar.AreaID
+                                    AND pa.AssignableObjectType = 2
+        LEFT JOIN tblTimeClock tc    ON pa.AssignableObjectID = tc.TimeClockID
+                                    AND pa.AssignableObjectType = 19
+        LEFT JOIN tblOccupancyGroup og ON pa.AssignableObjectID = og.OccupancyGroupID
+                                    AND pa.AssignableObjectType = 38
+        LEFT JOIN tblRentableSpace rs  ON pa.AssignableObjectID = rs.RentableSpaceID
+                                    AND pa.AssignableObjectType = 400
+        LEFT JOIN tblIntegrationCommandSet ics ON pa.AssignableObjectID = ics.IntegrationCommandSetID
+                                    AND pa.AssignableObjectType = 202
+        LEFT JOIN tblSequence seq    ON pa.AssignableObjectID = seq.SequenceID
+                                 AND pa.AssignableObjectType = 90
+        LEFT JOIN tblVariable var ON pa.AssignableObjectID = var.VariableID
+                                 AND pa.AssignableObjectType = 169
+        LEFT JOIN tblZone hz      ON pa.AssignableObjectID = hz.ZoneID
+                                 AND pa.AssignableObjectType = 211
+        LEFT JOIN tblShadeGroup sg ON pa.AssignableObjectID = sg.ShadeGroupID
+                                 AND pa.AssignableObjectType = 133
+        LEFT JOIN tblControlStationDevice csd ON pa.AssignableObjectID = csd.ControlStationDeviceID
+                                 AND pa.AssignableObjectType = 5
+        LEFT JOIN tblControlStation cs ON csd.ParentControlStationID = cs.ControlStationID
         WHERE pa.ParentID = ?
         ORDER BY pa.SortOrder
     """, (preset_id,))
+
     for a in assignments:
+        ot = a["AssignableObjectType"]
+        ct = a["AssignmentCommandType"]
+
+        # Consolidate zone name and ControlType
+        if ot == 198:
+            a["ZoneName"] = a["ZoneName198"]
+            a["ControlType"] = a["CtrlType198"]
+        elif ot == 15:
+            a["ZoneName"] = a["ZoneName15"]
+            a["ControlType"] = a["CtrlType15"]
+        else:
+            a["ZoneName"] = None
+            a["ControlType"] = None
+        # Remove redundant fields
+        for k in ("ZoneName198","CtrlType198","ZoneName15","CtrlType15"):
+            a.pop(k, None)
+
+        # Consolidate display names for new types
+        if ot != 2:
+            a.pop("AreaName", None)
+        if ot != 19:
+            a.pop("TimeclockName", None)
+        if ot != 38:
+            a.pop("OccupancyName", None)
+        if ot != 400:
+            a.pop("RoomPropName", None)
+        if ot != 202:
+            a.pop("IntegrationName", None)
+
+        # Load raw parameters
         params = q("""
             SELECT ParameterType, ParameterValue
             FROM tblAssignmentCommandParameter WHERE ParentId = ? ORDER BY SortOrder
         """, (a["PresetAssignmentID"],))
         pm = {p["ParameterType"]: p["ParameterValue"] for p in params}
+        a["_params"] = pm   # keep raw for debugging
+
         a["fade"]  = pm.get(1, 0)
         a["delay"] = pm.get(2, 0)
-        a["level"] = pm.get(17, 10000)
+
+        if ot == 198:
+            # Legacy: level stored 0–10000, normalise to 0–100 for UI
+            raw = pm.get(17, 10000)
+            a["level"] = raw // 100
+        elif ot == 15:
+            if ct == 2:
+                a["level"] = pm.get(3, 100)     # Dimmer/Switched 0–100
+            elif ct == 18:
+                a["level"] = pm.get(18, 100)    # CCO Maintained 0/100
+            else:
+                a["level"] = None               # CCO Pulsed – no level
+        elif ot == 2:
+            a["level"] = pm.get(3, 100)         # Area level 0–100
+        elif ot == 38:
+            a["level"] = pm.get(35, 1)          # Occupancy state 1/2/4
+        elif ot == 400:
+            # Confirmed: PT76-80 → prop_ids 149-153, PT81=always Unaffected
+            UNAFFECTED = 65280
+            a["props"] = {
+                149: pm.get(76, UNAFFECTED),
+                150: pm.get(77, UNAFFECTED),
+                151: pm.get(78, UNAFFECTED),
+                152: pm.get(79, UNAFFECTED),
+                153: pm.get(80, UNAFFECTED),
+            }
+            a["level"] = None
+        elif ot == 133:
+            a["level"] = pm.get(7, 0)           # Shade position 0–100
+        elif ot == 5:
+            a["level"] = pm.get(22, 0)          # Device: lock value
+        else:
+            a["level"] = None
+
+        # Variable: target state
+        a["state_id"] = pm.get(32)
+        if ot == 169 and a["state_id"]:
+            rows = q("SELECT Name FROM tblVariableState WHERE VariableStateID = ?",
+                     (a["state_id"],))
+            a["StateName"] = rows[0]["Name"] if rows else None
+        else:
+            a["StateName"] = None
+
     return jsonify(assignments)
 
 
 @app.route("/api/preset/<int:preset_id>/assignments", methods=["POST"])
 def add_preset_assignment(preset_id):
-    """Add a zone to an action preset."""
+    """Add an item assignment to an action preset."""
     if not state["db_name"]:
         return jsonify({"error": "DB未接続"}), 400
     data = request.json or {}
-    zone_id = data.get("zone_id")
-    if zone_id is None:
-        return jsonify({"error": "zone_id が必要です"}), 400
-    existing = q("""SELECT PresetAssignmentID FROM tblPresetAssignment
-                    WHERE ParentID = ? AND AssignableObjectID = ? AND AssignableObjectType = 198""",
-                 (preset_id, zone_id))
-    if existing:
-        return jsonify({"error": "このゾーンはすでに割り当て済みです"}), 400
+    item_type = data.get("item_type", "zone")
+
+    if item_type in ("zone", "cco"):
+        item_id = data.get("item_id")
+        if item_id is None:
+            return jsonify({"error": "item_id が必要です"}), 400
+        # Fetch ControlType to choose the right CmdType/CmdGroup/param
+        zrow = q("SELECT ControlType FROM tblZone WHERE ZoneID = ?", (item_id,))
+        ctrl = zrow[0]["ControlType"] if zrow else 1
+        cmd_type, cmd_group, lv_param = _ZONE_CMD_MAP.get(ctrl, (2, 1, 3))
+        obj_type = 15
+        existing = q("SELECT PresetAssignmentID FROM tblPresetAssignment WHERE ParentID=? AND AssignableObjectID=? AND AssignableObjectType=15 AND AssignmentCommandType=?",
+                     (preset_id, item_id, cmd_type))
+        if existing:
+            return jsonify({"error": "このゾーンはすでに割り当て済みです"}), 400
+        level = int(data.get("level", 100))
+        fade  = int(data.get("fade",  0))
+        delay = int(data.get("delay", 0))
+        if lv_param is not None:
+            params = [(0, 1, fade), (1, 2, delay), (2, lv_param, level)]
+        else:
+            params = [(0, 2, delay)]  # CCO Pulsed: no level
+
+    elif item_type == "shade":
+        item_id = data.get("item_id")
+        if item_id is None:
+            return jsonify({"error": "item_id が必要です"}), 400
+        obj_type, cmd_type, cmd_group = 133, 5, 11
+        existing = q("SELECT PresetAssignmentID FROM tblPresetAssignment WHERE ParentID=? AND AssignableObjectID=? AND AssignableObjectType=133",
+                     (preset_id, item_id))
+        if existing:
+            return jsonify({"error": "このシェードグループはすでに割り当て済みです"}), 400
+        pos = int(data.get("level", 0))
+        params = [(0, 2, int(data.get("delay", 0))), (1, 7, pos)]
+
+    elif item_type == "device":
+        item_id = data.get("item_id")
+        if item_id is None:
+            return jsonify({"error": "item_id が必要です"}), 400
+        obj_type, cmd_type, cmd_group = 5, 19, 20
+        existing = q("SELECT PresetAssignmentID FROM tblPresetAssignment WHERE ParentID=? AND AssignableObjectID=? AND AssignableObjectType=5",
+                     (preset_id, item_id))
+        if existing:
+            return jsonify({"error": "このデバイスはすでに割り当て済みです"}), 400
+        lock_val = int(data.get("level", 1))  # 1=Lock, 2=Unlock
+        params = [(0, 22, lock_val), (1, 29, 0), (2, 2, int(data.get("delay", 0)))]
+
+    elif item_type == "sequence":
+        item_id = data.get("item_id")
+        if item_id is None:
+            return jsonify({"error": "item_id が必要です"}), 400
+        obj_type, cmd_group = 90, 16
+        cmd_type = int(data.get("cmd_type", 21))  # 21=Start, 23=Pause
+        if cmd_type not in (21, 23):
+            return jsonify({"error": "cmd_type は 21(開始) または 23(一時停止) のみ有効"}), 400
+        existing = q("SELECT PresetAssignmentID FROM tblPresetAssignment WHERE ParentID=? AND AssignableObjectID=? AND AssignableObjectType=90 AND AssignmentCommandType=?",
+                     (preset_id, item_id, cmd_type))
+        if existing:
+            return jsonify({"error": "このシーケンスはすでに割り当て済みです"}), 400
+        params = [(0, 2, int(data.get("delay", 0)))]
+
+    elif item_type == "variable":
+        item_id  = data.get("item_id")
+        state_id = data.get("state_id")
+        if item_id is None or state_id is None:
+            return jsonify({"error": "item_id と state_id が必要です"}), 400
+        obj_type, cmd_type, cmd_group = 169, 39, 27
+        existing = q("""SELECT pa.PresetAssignmentID FROM tblPresetAssignment pa
+                        JOIN tblAssignmentCommandParameter acp ON acp.ParentId=pa.PresetAssignmentID
+                        WHERE pa.ParentID=? AND pa.AssignableObjectID=? AND pa.AssignableObjectType=169
+                          AND acp.ParameterType=32 AND acp.ParameterValue=?""",
+                     (preset_id, item_id, state_id))
+        if existing:
+            return jsonify({"error": "この変数とステートの組み合わせはすでに割り当て済みです"}), 400
+        params = [(0, 32, int(state_id)), (1, 2, int(data.get("delay", 0)))]
+
+    elif item_type == "area":
+        item_id = data.get("item_id")
+        if item_id is None:
+            return jsonify({"error": "item_id が必要です"}), 400
+        obj_type, cmd_type, cmd_group = 2, 2, 1
+        existing = q("SELECT PresetAssignmentID FROM tblPresetAssignment WHERE ParentID=? AND AssignableObjectID=? AND AssignableObjectType=2",
+                     (preset_id, item_id))
+        if existing:
+            return jsonify({"error": "このエリアはすでに割り当て済みです"}), 400
+        level = int(data.get("level", 100))
+        fade  = int(data.get("fade",  0))
+        delay = int(data.get("delay", 0))
+        params = [(0, 1, fade), (1, 2, delay), (2, 3, level)]
+
+    elif item_type == "hvac":
+        item_id = data.get("item_id")
+        if item_id is None:
+            return jsonify({"error": "item_id が必要です"}), 400
+        obj_type, cmd_type, cmd_group = 211, 59, 31
+        existing = q("SELECT PresetAssignmentID FROM tblPresetAssignment WHERE ParentID=? AND AssignableObjectID=? AND AssignableObjectType=211",
+                     (preset_id, item_id))
+        if existing:
+            return jsonify({"error": "このHVACゾーンはすでに割り当て済みです"}), 400
+        params = [(0, 44, 255), (1, 47, 255), (2, 48, 255),
+                  (3, 53, 0), (4, 54, 720), (5, 55, 0), (6, 56, 0), (7, 57, 0)]
+
+    elif item_type == "timeclock":
+        # NOTE: cmd_type/group/params need verification via /api/cond-debug assignment_cmd_types
+        item_id = data.get("item_id")
+        if item_id is None:
+            return jsonify({"error": "item_id が必要です"}), 400
+        enable = int(data.get("cmd_type", 1))  # 1=Enable, 0=Disable
+        obj_type, cmd_type, cmd_group = 19, (36 if enable else 37), 17
+        existing = q("SELECT PresetAssignmentID FROM tblPresetAssignment WHERE ParentID=? AND AssignableObjectID=? AND AssignableObjectType=19 AND AssignmentCommandType=?",
+                     (preset_id, item_id, cmd_type))
+        if existing:
+            return jsonify({"error": "このタイムクロックはすでに割り当て済みです"}), 400
+        delay = int(data.get("delay", 0))
+        params = [(0, 2, delay)]
+
+    elif item_type == "occupancy":
+        # NOTE: cmd_type/group/params need verification via /api/cond-debug assignment_cmd_types
+        item_id = data.get("item_id")
+        if item_id is None:
+            return jsonify({"error": "item_id が必要です"}), 400
+        obj_type, cmd_type, cmd_group = 38, 46, 22
+        existing = q("SELECT PresetAssignmentID FROM tblPresetAssignment WHERE ParentID=? AND AssignableObjectID=? AND AssignableObjectType=38",
+                     (preset_id, item_id))
+        if existing:
+            return jsonify({"error": "このOccupancy Groupはすでに割り当て済みです"}), 400
+        state_val = int(data.get("level", 1))  # 1=Occupied, 2=Unoccupied, 4=Bypass
+        delay = int(data.get("delay", 0))
+        params = [(0, 35, state_val), (1, 2, delay)]
+
+    elif item_type == "roomprop":
+        # Confirmed: ObjType=400, CmdType=80, CmdGroup=47
+        # PT76-80 = prop_ids 149-153 (pt = prop_id - 73), PT81 = always Unaffected
+        # Values: 0=Off, 1=On, 65280=Unaffected
+        item_id = int(data.get("item_id", 34))
+        obj_type, cmd_type, cmd_group = 400, 80, 47
+        UNAFFECTED = 65280
+        PROP_TO_PT = {149: 76, 150: 77, 151: 78, 152: 79, 153: 80}
+        props = data.get("props", {})  # { "149": 0/1/65280, ... }
+        delay = int(data.get("delay", 0))
+        params = []
+        for prop_id_int, pt in sorted(PROP_TO_PT.items(), key=lambda x: x[1]):
+            val = int(props.get(str(prop_id_int), UNAFFECTED))
+            params.append((pt - 76, pt, val))
+        params.append((5, 81, UNAFFECTED))
+        params.append((6, 2, delay))
+
+    elif item_type == "integration":
+        # ObjType=202 (IntegrationCommandSet), confirmed CmdType=52, CmdGroup=36
+        item_id = data.get("item_id")
+        if item_id is None:
+            return jsonify({"error": "item_id が必要です"}), 400
+        obj_type, cmd_type, cmd_group = 202, 52, 36
+        existing = q("SELECT PresetAssignmentID FROM tblPresetAssignment WHERE ParentID=? AND AssignableObjectID=? AND AssignableObjectType=202",
+                     (preset_id, item_id))
+        if existing:
+            return jsonify({"error": "このIntegrationコマンドはすでに割り当て済みです"}), 400
+        delay = int(data.get("delay", 0))
+        params = [(0, 2, delay)]
+
+    else:
+        return jsonify({"error": f"不明なタイプ: {item_type}"}), 400
+
     try:
         sort = q("SELECT ISNULL(MAX(SortOrder), -1) + 1 AS s FROM tblPresetAssignment WHERE ParentID = ?",
                  (preset_id,))[0]["s"]
         aid = _alloc_and_insert("tblPresetAssignment", "PresetAssignmentID", {
             "Name": "", "DatabaseRevision": 0, "SortOrder": sort,
             "ParentID": preset_id, "ParentType": 43,
-            "AssignableObjectID": zone_id, "AssignableObjectType": 198,
-            "AssignmentCommandType": 16, "NeedsTransfer": 1,
-            "AssignmentCommandGroup": 12, "WhereUsedId": 2147483647,
+            "AssignableObjectID": item_id, "AssignableObjectType": obj_type,
+            "AssignmentCommandType": cmd_type, "NeedsTransfer": 1,
+            "AssignmentCommandGroup": cmd_group, "WhereUsedId": 2147483647,
         })
-        fade  = int(data.get("fade",  0))
-        delay = int(data.get("delay", 0))
-        level = int(data.get("level", 10000))
-        for sort_p, ptype, pval in [(0, 1, fade), (1, 2, delay), (2, 17, level)]:
+        for sort_p, ptype, pval in params:
             execute_sql(
                 "INSERT INTO tblAssignmentCommandParameter (SortOrder,ParentId,ParameterType,ParameterValue) VALUES (?,?,?,?)",
                 (sort_p, aid, ptype, pval))
@@ -2295,19 +2721,72 @@ def add_preset_assignment(preset_id):
 
 @app.route("/api/assignment/<int:assignment_id>", methods=["PATCH"])
 def update_assignment(assignment_id):
-    """Update fade/delay/level for a zone assignment."""
+    """Update parameters for an assignment."""
     if not state["db_name"]:
         return jsonify({"error": "DB未接続"}), 400
     data = request.json or {}
+
+    # Update AssignmentCommandType if requested (e.g. sequence Start→Pause)
+    if "cmd_type" in data:
+        try:
+            execute_sql("UPDATE tblPresetAssignment SET AssignmentCommandType=? WHERE PresetAssignmentID=?",
+                        (int(data["cmd_type"]), assignment_id))
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
+    # Build param-type → value mapping
     mapping = {}
     if "fade"  in data: mapping[1]  = int(data["fade"])
     if "delay" in data: mapping[2]  = int(data["delay"])
-    if "level" in data: mapping[17] = int(data["level"])
+    if "state_id" in data: mapping[32] = int(data["state_id"])
+
+    if "level" in data:
+        # Look up assignment to determine correct ParameterType for level
+        assn = q("SELECT AssignableObjectType, AssignmentCommandType FROM tblPresetAssignment WHERE PresetAssignmentID=?",
+                 (assignment_id,))
+        if assn:
+            ot = assn[0]["AssignableObjectType"]
+            ct = assn[0]["AssignmentCommandType"]
+            if ot == 198:
+                mapping[17] = int(data["level"]) * 100  # legacy: 0–10000 scale
+            elif ot == 15:
+                if ct == 2:
+                    mapping[3]  = int(data["level"])   # Dimmer/Switched: ParamType 3, 0–100
+                elif ct == 18:
+                    mapping[18] = int(data["level"])   # CCO Maintained: ParamType 18, 0/100
+            elif ot == 2:
+                mapping[3]  = int(data["level"])       # Area level: ParamType 3, 0–100
+            elif ot == 38:
+                mapping[35] = int(data["level"])       # Occupancy state: ParamType 35
+            # Room property: handled separately via "props" field, not "level"
+            elif ot == 133:
+                mapping[7]  = int(data["level"])       # Shade position: ParamType 7
+            elif ot == 5:
+                mapping[22] = int(data["level"])       # Device lock: ParamType 22
+
+    # Room property props dict (ObjType=400)
+    if "props" in data and isinstance(data["props"], dict):
+        PROP_TO_PT = {149: 76, 150: 77, 151: 78, 152: 79, 153: 80}
+        for prop_id_str, val in data["props"].items():
+            try:
+                prop_id = int(prop_id_str)
+            except (ValueError, TypeError):
+                continue
+            if prop_id not in PROP_TO_PT:
+                continue
+            pt = PROP_TO_PT[prop_id]
+            mapping[pt] = int(val)
+
     try:
         for ptype, pval in mapping.items():
-            execute_sql(
-                "UPDATE tblAssignmentCommandParameter SET ParameterValue = ? WHERE ParentId = ? AND ParameterType = ?",
-                (pval, assignment_id, ptype))
+            rows = q("SELECT 1 FROM tblAssignmentCommandParameter WHERE ParentId=? AND ParameterType=?",
+                     (assignment_id, ptype))
+            if rows:
+                execute_sql("UPDATE tblAssignmentCommandParameter SET ParameterValue=? WHERE ParentId=? AND ParameterType=?",
+                            (pval, assignment_id, ptype))
+            else:
+                execute_sql("INSERT INTO tblAssignmentCommandParameter (SortOrder,ParentId,ParameterType,ParameterValue) VALUES (?,?,?,?)",
+                            (0, assignment_id, ptype, pval))
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500

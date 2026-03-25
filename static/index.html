@@ -2678,6 +2678,42 @@ async function saveFile() {
 
 // ── Actions tab ──────────────────────────────
 
+// ControlType: 1=Dimmer, 2=Switched, 5=Shade, 6=Fan, 7=CCO Maintained, 8=CCO Pulsed
+function _zoneLevelHTML(aid, ctrl, level, fade) {
+  const lv = (level == null ? 100 : level);
+  const fa = (fade  == null ? 0   : fade);
+  if (ctrl === 8) {
+    return `<span style="color:var(--text-dim);font-size:10px">パルス</span>`;
+  }
+  if (ctrl === 7) {
+    const sel = lv >= 50 ? 'selected' : '';
+    return `<select class="action-param-input" style="width:66px"
+      onchange="_updateAssignParam(${aid},{level:parseInt(this.value)})">
+      <option value="0"${!sel?' selected':''}>Open</option>
+      <option value="100"${sel}>Close</option>
+    </select>`;
+  }
+  if (ctrl === 2) {
+    const sel = lv >= 50 ? 'selected' : '';
+    return `<select class="action-param-input" style="width:58px"
+      onchange="_updateAssignParam(${aid},{level:parseInt(this.value)})">
+      <option value="100"${sel}>On</option>
+      <option value="0"${!sel?' selected':''}>Off</option>
+    </select>
+    <label style="color:var(--text-dim)">Fade</label>
+    <input type="number" class="action-param-input" min="0" max="3600" value="${fa}"
+      onchange="_updateAssignParam(${aid},{fade:parseInt(this.value)||0})">
+    <span style="color:var(--text-dim)">s</span>`;
+  }
+  return `<input type="number" class="action-param-input" min="0" max="100" value="${lv}"
+      style="width:42px" onchange="_updateAssignParam(${aid},{level:Math.min(100,Math.max(0,parseInt(this.value)||0))})">
+    <span style="color:var(--text-dim)">%</span>
+    <label style="color:var(--text-dim)">Fade</label>
+    <input type="number" class="action-param-input" min="0" max="3600" value="${fa}"
+      onchange="_updateAssignParam(${aid},{fade:parseInt(this.value)||0})">
+    <span style="color:var(--text-dim)">s</span>`;
+}
+
 async function loadActionsTab(uid, pmId) {
   const panel = document.getElementById(`${uid}-epanel-actions`);
   if (!panel) return;
@@ -2697,61 +2733,619 @@ function _renderActionsPanel(uid, pmId, actions, selPresetId) {
   let html = `<div style="display:flex;gap:4px;align-items:center;margin-bottom:8px;flex-wrap:wrap">`;
   if (actions.length) {
     html += `<select id="${uid}-action-sel" style="flex:1;min-width:100px"
-      onchange="_loadActionZones('${uid}',${pmId},parseInt(this.value))">${opts}</select>`;
-    html += `<button class="prog-del-btn" title="アクションを削除"
-      onclick="_deleteAction('${uid}',${pmId})">✕</button>`;
+      onchange="_loadActionAssignments('${uid}',${pmId},parseInt(this.value))">${opts}</select>`;
+    html += `<button class="prog-del-btn" title="アクションを削除" onclick="_deleteAction('${uid}',${pmId})">✕</button>`;
   } else {
     html += `<span style="color:var(--text-dim);font-size:11px">アクションなし</span>`;
   }
-  html += `<button class="prog-add-btn" title="アクションを追加"
-    onclick="_addAction('${uid}',${pmId})">＋</button>`;
-  html += `</div>`;
-  html += `<div id="${uid}-action-zones"></div>`;
+  html += `<button class="prog-add-btn" title="アクションを追加" onclick="_addAction('${uid}',${pmId})">＋</button>`;
+  html += `</div><div id="${uid}-action-assignments"></div>`;
   panel.innerHTML = html;
-  if (sel) _loadActionZones(uid, pmId, sel);
+  if (sel) _loadActionAssignments(uid, pmId, sel);
 }
 
-async function _loadActionZones(uid, pmId, presetId) {
-  const container = document.getElementById(`${uid}-action-zones`);
+const _SEQ_CMDS = [{v: 21, label: '開始'}, {v: 25, label: '停止'}, {v: 23, label: '一時停止'}];
+
+// ── Action assignment loading ──────────────────────────────────────────────────
+
+async function _loadActionAssignments(uid, pmId, presetId) {
+  const container = document.getElementById(`${uid}-action-assignments`);
   if (!container) return;
-  const res = await fetch(`/api/preset/${presetId}/assignments`);
-  if (!res.ok) { container.innerHTML = '<div style="color:red">エラー</div>'; return; }
-  const assignments = await res.json();
-  const zoneAssns = assignments.filter(a => a.AssignableObjectType === 198);
-  const assignedIds = new Set(zoneAssns.map(a => a.AssignableObjectID));
+  container.innerHTML = '<div style="color:var(--text-dim);font-size:11px">読み込み中...</div>';
+
+  const [assRes, varRes] = await Promise.all([
+    fetch(`/api/preset/${presetId}/assignments`),
+    loadVariables(),
+  ]);
+  if (!assRes.ok) { container.innerHTML = '<div style="color:red">エラー</div>'; return; }
+
+  const assignments = await assRes.json();
+  const variables = varRes;
+
+  // Build assignment data map for inline editing (e.g. room props)
+  _assignmentDataMap = {};
+  assignments.forEach(a => { _assignmentDataMap[a.PresetAssignmentID] = a; });
 
   let html = '';
-  if (zoneAssns.length) {
+
+  if (assignments.length === 0) {
+    html += '<div style="color:var(--text-dim);font-size:11px;padding:2px 0 6px">割り当てなし</div>';
+  } else {
     html += '<div style="margin-bottom:6px">';
-    zoneAssns.forEach(a => {
-      html += `<div class="action-zone-row">
-        <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">🔆 ${a.ZoneName||a.AssignableObjectID}</span>
-        <label style="color:var(--text-dim)">Fade</label>
-        <input type="number" class="action-param-input" min="0" max="3600" value="${a.fade||0}"
-          onchange="_updateZoneParam(${a.PresetAssignmentID},'fade',this.value)">
-        <span style="color:var(--text-dim)">s</span>
-        <label style="color:var(--text-dim)">Delay</label>
-        <input type="number" class="action-param-input" min="0" max="3600" value="${a.delay||0}"
-          onchange="_updateZoneParam(${a.PresetAssignmentID},'delay',this.value)">
-        <span style="color:var(--text-dim)">s</span>
-        <button class="prog-del-btn"
-          onclick="_removeZone(${a.PresetAssignmentID},'${uid}',${pmId},${presetId})">✕</button>
-      </div>`;
+    assignments.forEach(a => {
+      const aid = a.PresetAssignmentID;
+      const ot  = a.AssignableObjectType;
+      const ct  = a.AssignmentCommandType;
+      const del = a.delay || 0;
+
+      if (ot === 198 || ot === 15) {
+        const name = a.ZoneName || `ID:${a.AssignableObjectID}`;
+        const ctrl = a.ControlType || 1;
+        const icon = (ctrl === 7 || ctrl === 8) ? '⚡' : '🔆';
+        html += `<div class="action-zone-row">
+          <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${name}">${icon} ${name}</span>
+          ${_zoneLevelHTML(aid, ctrl, a.level, a.fade)}
+          <label style="color:var(--text-dim)">Delay</label>
+          <input type="number" class="action-param-input" min="0" max="3600" value="${del}"
+            onchange="_updateAssignParam(${aid},{delay:parseInt(this.value)||0})">
+          <span style="color:var(--text-dim)">s</span>
+          <button class="prog-del-btn" onclick="_removeAssignment(${aid},'${uid}',${pmId},${presetId})">✕</button>
+        </div>`;
+
+      } else if (ot === 2) {
+        const name = a.AreaName || `ID:${a.AssignableObjectID}`;
+        const lv   = (a.level == null ? 100 : a.level);
+        const fa   = (a.fade  == null ? 0   : a.fade);
+        html += `<div class="action-zone-row">
+          <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${name}">💡 ${name}</span>
+          <input type="number" class="action-param-input" min="0" max="100" value="${lv}" style="width:42px"
+            onchange="_updateAssignParam(${aid},{level:Math.min(100,Math.max(0,parseInt(this.value)||0))})">
+          <span style="color:var(--text-dim)">%</span>
+          <label style="color:var(--text-dim)">Fade</label>
+          <input type="number" class="action-param-input" min="0" max="3600" value="${fa}"
+            onchange="_updateAssignParam(${aid},{fade:parseInt(this.value)||0})">
+          <span style="color:var(--text-dim)">s</span>
+          <label style="color:var(--text-dim)">Delay</label>
+          <input type="number" class="action-param-input" min="0" max="3600" value="${del}"
+            onchange="_updateAssignParam(${aid},{delay:parseInt(this.value)||0})">
+          <span style="color:var(--text-dim)">s</span>
+          <button class="prog-del-btn" onclick="_removeAssignment(${aid},'${uid}',${pmId},${presetId})">✕</button>
+        </div>`;
+
+      } else if (ot === 133) {
+        const name = a.ShadeName || `ID:${a.AssignableObjectID}`;
+        const pos  = (a.level == null ? 0 : a.level);
+        html += `<div class="action-zone-row">
+          <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${name}">🪟 ${name}</span>
+          <input type="number" class="action-param-input" min="0" max="100" value="${pos}" style="width:42px"
+            onchange="_updateAssignParam(${aid},{level:Math.min(100,Math.max(0,parseInt(this.value)||0))})">
+          <span style="color:var(--text-dim)">%</span>
+          <label style="color:var(--text-dim)">Delay</label>
+          <input type="number" class="action-param-input" min="0" max="3600" value="${del}"
+            onchange="_updateAssignParam(${aid},{delay:parseInt(this.value)||0})">
+          <span style="color:var(--text-dim)">s</span>
+          <button class="prog-del-btn" onclick="_removeAssignment(${aid},'${uid}',${pmId},${presetId})">✕</button>
+        </div>`;
+
+      } else if (ot === 5) {
+        const name = a.DeviceName || `ID:${a.AssignableObjectID}`;
+        const lockVal = (a.level == null ? 1 : a.level);
+        html += `<div class="action-zone-row">
+          <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${name}">🔒 ${name}</span>
+          <select class="action-param-input" style="width:70px"
+            onchange="_updateAssignParam(${aid},{level:parseInt(this.value)})">
+            <option value="1"${lockVal==1?' selected':''}>Lock</option>
+            <option value="2"${lockVal==2?' selected':''}>Unlock</option>
+          </select>
+          <label style="color:var(--text-dim)">Delay</label>
+          <input type="number" class="action-param-input" min="0" max="3600" value="${del}"
+            onchange="_updateAssignParam(${aid},{delay:parseInt(this.value)||0})">
+          <span style="color:var(--text-dim)">s</span>
+          <button class="prog-del-btn" onclick="_removeAssignment(${aid},'${uid}',${pmId},${presetId})">✕</button>
+        </div>`;
+
+      } else if (ot === 90) {
+        const name = a.SeqName || `ID:${a.AssignableObjectID}`;
+        const cmdOpts = _SEQ_CMDS.map(c =>
+          `<option value="${c.v}"${ct==c.v?' selected':''}>${c.label}</option>`).join('');
+        html += `<div class="action-zone-row">
+          <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${name}">▶ ${name}</span>
+          <select class="action-param-input" style="width:80px"
+            onchange="_updateAssignParam(${aid},{cmd_type:parseInt(this.value)})">${cmdOpts}</select>
+          <label style="color:var(--text-dim)">Delay</label>
+          <input type="number" class="action-param-input" min="0" max="3600" value="${del}"
+            onchange="_updateAssignParam(${aid},{delay:parseInt(this.value)||0})">
+          <span style="color:var(--text-dim)">s</span>
+          <button class="prog-del-btn" onclick="_removeAssignment(${aid},'${uid}',${pmId},${presetId})">✕</button>
+        </div>`;
+
+      } else if (ot === 169) {
+        const name = a.VarName || `ID:${a.AssignableObjectID}`;
+        const varObj = variables.find(v => v.VariableID === a.AssignableObjectID);
+        const states = varObj ? varObj.states : [];
+        const stateOpts = states.length
+          ? states.map(s => `<option value="${s.VariableStateID}"${a.state_id==s.VariableStateID?' selected':''}>${s.Name}</option>`).join('')
+          : `<option value="${a.state_id}">${a.StateName||a.state_id||'?'}</option>`;
+        html += `<div class="action-zone-row">
+          <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${name}">⚙ ${name}</span>
+          <select class="action-param-input" style="width:80px"
+            onchange="_updateAssignParam(${aid},{state_id:parseInt(this.value)})">${stateOpts}</select>
+          <label style="color:var(--text-dim)">Delay</label>
+          <input type="number" class="action-param-input" min="0" max="3600" value="${del}"
+            onchange="_updateAssignParam(${aid},{delay:parseInt(this.value)||0})">
+          <span style="color:var(--text-dim)">s</span>
+          <button class="prog-del-btn" onclick="_removeAssignment(${aid},'${uid}',${pmId},${presetId})">✕</button>
+        </div>`;
+
+      } else if (ot === 211) {
+        const name = a.HvacName || `ID:${a.AssignableObjectID}`;
+        html += `<div class="action-zone-row">
+          <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${name}">🌡 ${name}</span>
+          <span style="color:var(--text-dim);font-size:10px">Unaffected</span>
+          <button class="prog-del-btn" onclick="_removeAssignment(${aid},'${uid}',${pmId},${presetId})">✕</button>
+        </div>`;
+
+      } else if (ot === 19) {
+        const name = a.TimeclockName || `ID:${a.AssignableObjectID}`;
+        const enableLabel = ct === 36 ? 'Enable' : ct === 37 ? 'Disable' : `Cmd:${ct}`;
+        html += `<div class="action-zone-row">
+          <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${name}">🕐 ${name}</span>
+          <select class="action-param-input" style="width:72px"
+            onchange="_updateAssignParam(${aid},{cmd_type:parseInt(this.value)})">
+            <option value="36"${ct===36?' selected':''}>Enable</option>
+            <option value="37"${ct===37?' selected':''}>Disable</option>
+          </select>
+          <label style="color:var(--text-dim)">Delay</label>
+          <input type="number" class="action-param-input" min="0" max="3600" value="${del}"
+            onchange="_updateAssignParam(${aid},{delay:parseInt(this.value)||0})">
+          <span style="color:var(--text-dim)">s</span>
+          <button class="prog-del-btn" onclick="_removeAssignment(${aid},'${uid}',${pmId},${presetId})">✕</button>
+        </div>`;
+
+      } else if (ot === 38) {
+        const name = a.OccupancyName || `ID:${a.AssignableObjectID}`;
+        const stateVal = a.level ?? 1;
+        html += `<div class="action-zone-row">
+          <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${name}">👤 ${name}</span>
+          <select class="action-param-input" style="width:90px"
+            onchange="_updateAssignParam(${aid},{level:parseInt(this.value)})">
+            <option value="1"${stateVal===1?' selected':''}>Occupied</option>
+            <option value="2"${stateVal===2?' selected':''}>Unoccupied</option>
+            <option value="4"${stateVal===4?' selected':''}>Bypass</option>
+          </select>
+          <label style="color:var(--text-dim)">Delay</label>
+          <input type="number" class="action-param-input" min="0" max="3600" value="${del}"
+            onchange="_updateAssignParam(${aid},{delay:parseInt(this.value)||0})">
+          <span style="color:var(--text-dim)">s</span>
+          <button class="prog-del-btn" onclick="_removeAssignment(${aid},'${uid}',${pmId},${presetId})">✕</button>
+        </div>`;
+
+      } else if (ot === 400) {
+        const name = a.RoomPropName || `ID:${a.AssignableObjectID}`;
+        const UNAFFECTED = 65280;
+        const props = a.props || {};
+        const propSummary = [[149,'Presence'],[150,'Emergency'],[151,'DND'],[152,'RoomState'],[153,'MUR']]
+          .map(([pid, nm]) => { const v = props[pid]; return (v === undefined || v === UNAFFECTED) ? null : `${nm}:${v===1?'On':'Off'}`; })
+          .filter(Boolean).join(' ') || 'All Unaffected';
+        html += `<div class="action-zone-row">
+          <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${name}">🏠 ${name}</span>
+          <span style="color:var(--text-dim);font-size:10px;max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${propSummary}">${propSummary}</span>
+          <button class="prog-add-btn" style="padding:1px 6px;font-size:10px"
+            onclick="_editRoomProps(${aid},'${uid}',${pmId},${presetId})">編集</button>
+          <label style="color:var(--text-dim)">Delay</label>
+          <input type="number" class="action-param-input" min="0" max="3600" value="${del}"
+            onchange="_updateAssignParam(${aid},{delay:parseInt(this.value)||0})">
+          <span style="color:var(--text-dim)">s</span>
+          <button class="prog-del-btn" onclick="_removeAssignment(${aid},'${uid}',${pmId},${presetId})">✕</button>
+        </div>`;
+
+      } else if (ot === 202) {
+        const name = a.IntegrationName || `ID:${a.AssignableObjectID}`;
+        html += `<div class="action-zone-row">
+          <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${name}">🔌 ${name}</span>
+          <span style="color:var(--text-dim);font-size:10px">Send</span>
+          <label style="color:var(--text-dim)">Delay</label>
+          <input type="number" class="action-param-input" min="0" max="3600" value="${del}"
+            onchange="_updateAssignParam(${aid},{delay:parseInt(this.value)||0})">
+          <span style="color:var(--text-dim)">s</span>
+          <button class="prog-del-btn" onclick="_removeAssignment(${aid},'${uid}',${pmId},${presetId})">✕</button>
+        </div>`;
+
+      } else {
+        const name = a.ZoneName || a.AreaName || a.SeqName || a.VarName || a.HvacName || a.ShadeName || a.DeviceName || a.TimeclockName || a.OccupancyName || a.RoomPropName || `ID:${a.AssignableObjectID}`;
+        html += `<div class="action-zone-row">
+          <span style="flex:1;color:var(--text-dim);font-size:10px" title="ObjType=${ot}">${name} (Type ${ot})</span>
+          <button class="prog-del-btn" onclick="_removeAssignment(${aid},'${uid}',${pmId},${presetId})">✕</button>
+        </div>`;
+      }
     });
     html += '</div>';
-  } else {
-    html += '<div style="color:var(--text-dim);font-size:11px;padding:2px 0 6px">ゾーン未割り当て</div>';
   }
 
-  const available = currentAreaZones.filter(z => !assignedIds.has(z.ZoneID));
-  if (available.length) {
-    const zOpts = available.map(z => `<option value="${z.ZoneID}">${z.Name}</option>`).join('');
-    html += `<div style="display:flex;gap:4px;align-items:center;margin-top:4px">
-      <select id="${uid}-zone-add-sel" style="flex:1;font-size:11px">${zOpts}</select>
-      <button class="prog-add-btn" onclick="_addZone('${uid}',${pmId},${presetId})">＋ ゾーンを追加</button>
-    </div>`;
-  }
+  // ── Add button ──
+  html += `<div style="border-top:1px solid var(--border);padding-top:6px;margin-top:4px">
+    <button class="prog-add-btn" style="font-size:11px;padding:3px 10px"
+      onclick="openActionPicker(event,'${uid}',${pmId},${presetId})">＋ 追加 ▾</button>
+  </div>`;
+
   container.innerHTML = html;
+}
+
+// ── Action picker (hierarchical hover menu, reuses condition picker CSS/infra) ─
+
+async function openActionPicker(event, uid, pmId, presetId) {
+  event.stopPropagation();
+  _closeCondPickerMenus();
+
+  const [vars, cd] = await Promise.all([loadVariables(), loadCondData()]);
+  const assRes = await fetch(`/api/preset/${presetId}/assignments`);
+  const assignments = assRes.ok ? await assRes.json() : [];
+
+  // Build sets of already-assigned IDs per object type
+  const asn = (ot) => new Set(assignments.filter(a => a.AssignableObjectType === ot).map(a => a.AssignableObjectID));
+  const asnZones = new Set([...assignments.filter(a => a.AssignableObjectType === 15 || a.AssignableObjectType === 198).map(a => a.AssignableObjectID)]);
+  const asnAreas = asn(2), asnShades = asn(133), asnDevs = asn(5), asnHvac = asn(211);
+
+  const categories = [
+    {
+      label: 'Lighting - Zones',
+      items: (cd.zones || []).filter(z => !asnZones.has(z.ZoneID)).map(z => ({
+        label: `${_areaLabel(z.AreaName, z.ParentAreaName)} ▶ ${z.ZoneName}`,
+        type: 'zone', data: { id: z.ZoneID, name: z.ZoneName, ctrl: z.ControlType || 1 },
+      })),
+    },
+    {
+      label: 'Lighting - Areas',
+      items: (cd.areas || []).filter(a => !asnAreas.has(a.AreaID)).map(a => ({
+        label: _areaLabel(a.AreaName, a.ParentAreaName),
+        type: 'area', data: { id: a.AreaID, name: a.AreaName || a.ParentAreaName },
+      })),
+    },
+    {
+      label: 'Contact Closure Outputs',
+      items: (cd.cco || []).filter(z => !asnZones.has(z.ZoneID)).map(z => ({
+        label: `${_areaLabel(z.AreaName, z.ParentAreaName)} ▶ ${z.ZoneName}`,
+        type: 'cco', data: { id: z.ZoneID, name: z.ZoneName, ctrl: z.ControlType || 7 },
+      })),
+    },
+    {
+      label: 'Shade Groups',
+      items: (cd.shades || []).filter(s => !asnShades.has(s.ShadeGroupID)).map(s => ({
+        label: s.ShadeName + (s.AreaName ? ` (${s.AreaName})` : ''),
+        type: 'shade', data: { id: s.ShadeGroupID, name: s.ShadeName },
+      })),
+    },
+    {
+      label: 'Sequences',
+      items: (cd.sequences || []).map(s => ({
+        label: s.SequenceName,
+        type: 'sequence', data: { id: s.SequenceID, name: s.SequenceName },
+      })),
+    },
+    {
+      label: 'Variables',
+      items: vars.map(v => ({
+        label: v.Name,
+        type: 'variable', data: { id: v.VariableID, name: v.Name, states: v.states },
+      })),
+    },
+    {
+      label: 'HVAC Zones',
+      items: (cd.hvac || []).filter(h => !asnHvac.has(h.ZoneID)).map(h => ({
+        label: `${_areaLabel(h.AreaName, h.ParentAreaName)} ▶ ${h.ZoneName}`,
+        type: 'hvac', data: { id: h.ZoneID, name: h.ZoneName },
+      })),
+    },
+    {
+      label: 'Devices',
+      items: (cd.devices || []).filter(d => !asnDevs.has(d.ControlStationDeviceID)).map(d => ({
+        label: `${_areaLabel(d.AreaName, d.ParentAreaName)} ▶ ${d.DeviceName}`,
+        type: 'device', data: { id: d.ControlStationDeviceID, name: d.DeviceName },
+      })),
+    },
+    {
+      label: 'Timeclocks',
+      items: (cd.timeclocks || []).map(r => ({
+        label: r.ModeName ? `${r.TimeclockName} / ${r.ModeName}` : r.TimeclockName,
+        type: 'timeclock', data: { id: r.TimeClockID, name: r.TimeclockName, modeId: r.TimeClockModeID },
+      })),
+    },
+    {
+      label: 'Occupancy Settings',
+      items: (cd.occupancy || []).map(r => ({
+        label: r.OGName || _areaLabel(r.AreaName, r.ParentAreaName),
+        type: 'occupancy', data: { id: r.OccupancyGroupID, name: r.OGName || r.AreaName },
+      })),
+    },
+    {
+      label: 'Room Properties',
+      items: (cd.rooms || []).map(r => ({
+        label: r.RoomName,
+        type: 'roomprop', data: { id: r.RentableSpaceID, name: r.RoomName },
+      })),
+    },
+    {
+      label: 'Ethernet Devices',
+      items: (cd.integrations || []).map(ic => ({
+        label: ic.AreaName ? `${ic.AreaName} ▶ ${ic.CommandName}` : ic.CommandName,
+        type: 'integration', data: { id: ic.IntegrationCommandSetID, name: ic.CommandName },
+      })),
+    },
+  ];
+
+  // Build menu (same structure & CSS as condition picker)
+  const primary = document.createElement('div');
+  primary.className = 'cond-picker-menu';
+  primary.addEventListener('mouseenter', _clearCondSubTimer);
+  _condPickerMenus[0] = primary;
+
+  categories.forEach(cat => {
+    const hasItems = cat.items.length > 0;
+    const el = document.createElement('div');
+    el.className = 'cpi';
+    el.innerHTML = `<span>${cat.label}</span><span class="cpi-arrow">▶</span>`;
+
+    el.addEventListener('mouseenter', () => {
+      _clearCondSubTimer();
+      _condPickerMenus[1]?.remove();
+      _condPickerMenus[1] = null;
+
+      const sub = document.createElement('div');
+      sub.className = 'cond-picker-menu cond-sub-menu';
+      sub.addEventListener('mouseenter', _clearCondSubTimer);
+      sub.addEventListener('mouseleave', _scheduleCondSubClose);
+      _condPickerMenus[1] = sub;
+
+      if (!hasItems) {
+        const empty = document.createElement('div');
+        empty.className = 'cpi cpi-disabled';
+        empty.innerHTML = '<span style="font-style:italic">データなし</span>';
+        sub.appendChild(empty);
+      }
+
+      cat.items.forEach(item => {
+        const sEl = document.createElement('div');
+        sEl.className = 'cpi';
+        sEl.innerHTML = `<span>${item.label}</span>`;
+        sEl.addEventListener('click', e => {
+          e.stopPropagation();
+          _closeCondPickerMenus();
+          _openActionParamModal(uid, pmId, presetId, item.type, item.data);
+        });
+        sub.appendChild(sEl);
+      });
+
+      const prRect = primary.getBoundingClientRect();
+      const elRect = el.getBoundingClientRect();
+      const vh = window.innerHeight;
+      const subH = Math.min(cat.items.length * 27 + 6, 320);
+      const top = Math.min(elRect.top, vh - subH - 8);
+      sub.style.cssText = `top:${top}px;left:${prRect.right + 2}px`;
+      document.body.appendChild(sub);
+    });
+
+    el.addEventListener('mouseleave', _scheduleCondSubClose);
+    primary.appendChild(el);
+  });
+
+  const rect = event.currentTarget?.getBoundingClientRect?.() || { bottom: event.clientY, left: event.clientX };
+  const vh = window.innerHeight;
+  const ph = categories.length * 27 + 6;
+  const top = Math.min(rect.bottom + 2, vh - ph - 8);
+  primary.style.cssText = `top:${top}px;left:${rect.left}px`;
+  document.body.appendChild(primary);
+
+  setTimeout(() => document.addEventListener('click', _closeCondPickerMenus, { once: true }), 0);
+}
+
+let _actionParamContext = null;  // { uid, pmId, presetId, type, itemData, editAid }
+let _assignmentDataMap = {};    // aid → assignment data (populated in _loadActionAssignments)
+
+function _openActionParamModal(uid, pmId, presetId, type, itemData, editAid) {
+  _actionParamContext = { uid, pmId, presetId, type, itemData, editAid: editAid || null };
+  const existing = document.getElementById('action-param-overlay');
+  if (existing) existing.remove();
+
+  let paramsHtml = '';
+  if (type === 'zone' || type === 'cco') {
+    const ctrl = itemData.ctrl || 1;
+    if (ctrl === 8) {
+      paramsHtml = `<span style="grid-column:1/-1;color:var(--text-dim);font-size:11px">CCO Pulsed — パラメータなし</span>`;
+    } else if (ctrl === 7) {
+      paramsHtml = `
+        <label>状態</label>
+        <select id="ap-level"><option value="0">Open</option><option value="100">Close</option></select>`;
+    } else if (ctrl === 2) {
+      paramsHtml = `
+        <label>状態</label>
+        <select id="ap-level"><option value="100">On</option><option value="0">Off</option></select>
+        <label>Fade (s)</label><input id="ap-fade" type="number" min="0" max="3600" value="0">`;
+    } else {
+      paramsHtml = `
+        <label>Level (%)</label><input id="ap-level" type="number" min="0" max="100" value="100">
+        <label>Fade (s)</label><input id="ap-fade" type="number" min="0" max="3600" value="0">`;
+    }
+    paramsHtml += `<label>Delay (s)</label><input id="ap-delay" type="number" min="0" max="3600" value="0">`;
+
+  } else if (type === 'area') {
+    paramsHtml = `
+      <label>Level (%)</label><input id="ap-level" type="number" min="0" max="100" value="100">
+      <label>Fade (s)</label><input id="ap-fade" type="number" min="0" max="3600" value="0">
+      <label>Delay (s)</label><input id="ap-delay" type="number" min="0" max="3600" value="0">`;
+
+  } else if (type === 'shade') {
+    paramsHtml = `
+      <label>位置 (%)</label><input id="ap-level" type="number" min="0" max="100" value="0">
+      <label>Delay (s)</label><input id="ap-delay" type="number" min="0" max="3600" value="0">`;
+
+  } else if (type === 'sequence') {
+    const cOpts = _SEQ_CMDS.map(c => `<option value="${c.v}">${c.label}</option>`).join('');
+    paramsHtml = `
+      <label>コマンド</label><select id="ap-cmd">${cOpts}</select>
+      <label>Delay (s)</label><input id="ap-delay" type="number" min="0" max="3600" value="0">`;
+
+  } else if (type === 'variable') {
+    const stOpts = (itemData.states || []).map(s =>
+      `<option value="${s.VariableStateID}">${s.Name}</option>`).join('');
+    paramsHtml = `
+      <label>ステート</label>
+      <select id="ap-state">${stOpts || '<option value="">ステートなし</option>'}</select>
+      <label>Delay (s)</label><input id="ap-delay" type="number" min="0" max="3600" value="0">`;
+
+  } else if (type === 'hvac') {
+    paramsHtml = `<span style="grid-column:1/-1;color:var(--text-dim);font-size:11px">HVAC — Unaffected (パラメータなし)</span>`;
+
+  } else if (type === 'device') {
+    paramsHtml = `
+      <label>状態</label>
+      <select id="ap-level"><option value="1">Lock</option><option value="2">Unlock</option></select>
+      <label>Delay (s)</label><input id="ap-delay" type="number" min="0" max="3600" value="0">`;
+
+  } else if (type === 'timeclock') {
+    paramsHtml = `
+      <label>コマンド</label>
+      <select id="ap-cmd">
+        <option value="1">Enable</option>
+        <option value="0">Disable</option>
+      </select>
+      <label>Delay (s)</label><input id="ap-delay" type="number" min="0" max="3600" value="0">`;
+
+  } else if (type === 'occupancy') {
+    paramsHtml = `
+      <label>状態</label>
+      <select id="ap-level">
+        <option value="1">Occupied</option>
+        <option value="2">Unoccupied</option>
+        <option value="4">Bypass</option>
+      </select>
+      <label>Delay (s)</label><input id="ap-delay" type="number" min="0" max="3600" value="0">`;
+
+  } else if (type === 'roomprop') {
+    const UNAFFECTED = 65280;
+    const currentProps = itemData.currentProps || {};
+    const propDefs = [[149,'Presence Status'],[150,'Emergency Mode'],[151,'Do Not Disturb'],[152,'Room State'],[153,'Make Up Room']];
+    paramsHtml = propDefs.map(([pid, pname]) => {
+      const cur = currentProps[pid] !== undefined ? currentProps[pid] : UNAFFECTED;
+      return `<label>${pname}</label>
+      <select id="ap-prop-${pid}">
+        <option value="${UNAFFECTED}"${cur===UNAFFECTED?' selected':''}>Unaffected</option>
+        <option value="1"${cur===1?' selected':''}>On</option>
+        <option value="0"${cur===0?' selected':''}>Off</option>
+      </select>`;
+    }).join('') + `<label>Delay (s)</label><input id="ap-delay" type="number" min="0" max="3600" value="${itemData.currentDelay||0}">`;
+
+  } else if (type === 'integration') {
+    paramsHtml = `<label>Delay (s)</label><input id="ap-delay" type="number" min="0" max="3600" value="0">`;
+  }
+
+  const overlay = document.createElement('div');
+  overlay.className = 'scene-picker-overlay';
+  overlay.id = 'action-param-overlay';
+  overlay.innerHTML = `
+    <div class="scene-picker-modal" onclick="event.stopPropagation()" style="max-width:340px">
+      <div class="scene-picker-header">
+        <span>${itemData.name}</span>
+        <button onclick="document.getElementById('action-param-overlay').remove()">✕</button>
+      </div>
+      <div style="padding:16px;display:grid;grid-template-columns:auto 1fr;gap:8px 12px;align-items:center;font-size:11px">
+        ${paramsHtml}
+      </div>
+      <div class="scene-picker-footer">
+        <button class="btn btn-primary" style="font-size:11px;padding:4px 12px"
+          onclick="_confirmActionParam()">追加</button>
+        <button class="btn" style="font-size:11px;padding:4px 10px;background:var(--surface2);color:var(--text-dim)"
+          onclick="document.getElementById('action-param-overlay').remove()">キャンセル</button>
+      </div>
+    </div>`;
+  overlay.addEventListener('click', () => overlay.remove());
+  document.body.appendChild(overlay);
+}
+
+async function _confirmActionParam() {
+  if (!_actionParamContext) return;
+  const { uid, pmId, presetId, type, itemData, editAid } = _actionParamContext;
+
+  const lvlEl   = document.getElementById('ap-level');
+  const fadeEl  = document.getElementById('ap-fade');
+  const delayEl = document.getElementById('ap-delay');
+  const cmdEl   = document.getElementById('ap-cmd');
+  const stateEl = document.getElementById('ap-state');
+
+  const level = lvlEl  ? parseInt(lvlEl.value)  : 100;
+  const fade  = fadeEl ? parseInt(fadeEl.value)  : 0;
+  const delay = delayEl? parseInt(delayEl.value) : 0;
+
+  let body = { item_type: type, item_id: itemData.id, delay };
+  if (type === 'sequence') {
+    body.cmd_type = cmdEl ? parseInt(cmdEl.value) : 21;
+  } else if (type === 'variable') {
+    if (!stateEl || !stateEl.value) { toast('ステートを選択してください', 'red'); return; }
+    body.state_id = parseInt(stateEl.value);
+  } else if (type === 'timeclock') {
+    body.cmd_type = cmdEl ? parseInt(cmdEl.value) : 1;
+  } else if (type === 'occupancy') {
+    body.level = level;
+  } else if (type === 'roomprop') {
+    const UNAFFECTED = 65280;
+    body.props = {};
+    [149, 150, 151, 152, 153].forEach(pid => {
+      const el = document.getElementById(`ap-prop-${pid}`);
+      body.props[String(pid)] = el ? parseInt(el.value) : UNAFFECTED;
+    });
+  } else if (type !== 'hvac' && type !== 'integration') {
+    body.level = level;
+    if (fadeEl) body.fade = fade;
+  }
+
+  document.getElementById('action-param-overlay')?.remove();
+  _actionParamContext = null;
+
+  let res;
+  if (editAid) {
+    // Edit mode: PATCH the existing assignment
+    res = await fetch(`/api/assignment/${editAid}`, {
+      method: 'PATCH', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+  } else {
+    res = await fetch(`/api/preset/${presetId}/assignments`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+  }
+  const data = await res.json();
+  if (!res.ok) { toast(data.error || 'エラー', 'red'); return; }
+  markDirty();
+  _loadActionAssignments(uid, pmId, presetId);
+}
+
+function _editRoomProps(aid, uid, pmId, presetId) {
+  const a = _assignmentDataMap[aid];
+  if (!a) return;
+  const UNAFFECTED = 65280;
+  const props = a.props || {};
+  const currentProps = {};
+  [149, 150, 151, 152, 153].forEach(pid => {
+    currentProps[pid] = props[pid] !== undefined ? props[pid] : UNAFFECTED;
+  });
+  const itemData = { id: a.AssignableObjectID, name: a.RoomPropName || `ID:${a.AssignableObjectID}`,
+                     currentProps, currentDelay: a.delay || 0 };
+  _openActionParamModal(uid, pmId, presetId, 'roomprop', itemData, aid);
+}
+
+async function _removeAssignment(assignmentId, uid, pmId, presetId) {
+  const res = await fetch(`/api/assignment/${assignmentId}`, {method:'DELETE'});
+  if (!res.ok) { const d=await res.json(); toast(d.error||'エラー','red'); return; }
+  markDirty();
+  _loadActionAssignments(uid, pmId, presetId);
+}
+
+async function _updateAssignParam(assignmentId, fields) {
+  await fetch(`/api/assignment/${assignmentId}`, {
+    method:'PATCH', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(fields)
+  });
+  markDirty();
 }
 
 async function _addAction(uid, pmId) {
@@ -2775,36 +3369,6 @@ async function _deleteAction(uid, pmId) {
   const r2 = await fetch(`/api/pm/${pmId}/actions`);
   const actions = await r2.json();
   _renderActionsPanel(uid, pmId, actions, null);
-}
-
-async function _addZone(uid, pmId, presetId) {
-  const sel = document.getElementById(`${uid}-zone-add-sel`);
-  if (!sel) return;
-  const zoneId = parseInt(sel.value);
-  const res = await fetch(`/api/preset/${presetId}/assignments`, {
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({zone_id: zoneId, fade:0, delay:0, level:10000})
-  });
-  const data = await res.json();
-  if (!res.ok) { toast(data.error||'エラー','red'); return; }
-  markDirty();
-  _loadActionZones(uid, pmId, presetId);
-}
-
-async function _removeZone(assignmentId, uid, pmId, presetId) {
-  const res = await fetch(`/api/assignment/${assignmentId}`, {method:'DELETE'});
-  if (!res.ok) { const d=await res.json(); toast(d.error||'エラー','red'); return; }
-  markDirty();
-  _loadActionZones(uid, pmId, presetId);
-}
-
-async function _updateZoneParam(assignmentId, field, value) {
-  const body = {}; body[field] = parseInt(value)||0;
-  await fetch(`/api/assignment/${assignmentId}`, {
-    method:'PATCH', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify(body)
-  });
-  markDirty();
 }
 
 async function changeExecutionType(actionId, execType) {
