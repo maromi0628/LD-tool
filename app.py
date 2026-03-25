@@ -13,7 +13,7 @@ import threading
 import webbrowser
 import tkinter as tk
 from tkinter import filedialog
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, request, send_from_directory, send_file
 
 try:
     import pyodbc
@@ -33,7 +33,31 @@ state = {
     "tmpl_zip_name": None,   # same as template_id (kept for clarity in save)
 }
 
-SQL_INSTANCE = r".\LUTRON2022"
+def _detect_sql_instance():
+    """Auto-detect the installed LUTRON SQL Server instance from the registry.
+    Falls back to LUTRON2022 if none found."""
+    try:
+        import winreg
+        key = winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"SOFTWARE\Microsoft\Microsoft SQL Server\Instance Names\SQL",
+        )
+        i = 0
+        while True:
+            try:
+                name, _, _ = winreg.EnumValue(key, i)
+                i += 1
+                if "LUTRON" in name.upper():
+                    winreg.CloseKey(key)
+                    return rf".\{name}"
+            except OSError:
+                break
+        winreg.CloseKey(key)
+    except OSError:
+        pass
+    return r".\LUTRON2022"
+
+SQL_INSTANCE = _detect_sql_instance()
 
 
 def diagnose_sql():
@@ -491,39 +515,56 @@ def get_diagnostics():
 
 @app.route("/api/open", methods=["POST"])
 def open_file():
-    """Open a .pl file or a folder via file dialog."""
-    root = tk.Tk()
-    root.withdraw()
-    root.attributes("-topmost", True)
-
-    mode = request.json.get("mode", "pl")  # "pl" or "folder"
+    """Open a .pl file or a folder via web upload."""
+    mode = request.form.get("mode", "pl")  # "pl" or "folder"
 
     if mode == "pl":
-        path = filedialog.askopenfilename(
-            title="LDプロジェクトファイル (.pl) を選択",
-            filetypes=[("Lutron Project", "*.pl"), ("All files", "*.*")]
-        )
-        root.destroy()
-        if not path:
-            return jsonify({"error": "キャンセルされました"}), 400
+        if "file" not in request.files:
+            return jsonify({"error": "ファイルがアップロードされていません"}), 400
+        file = request.files["file"]
+        if file.filename == "":
+            return jsonify({"error": "ファイルが選択されていません"}), 400
 
         if state["work_dir"] and state["pl_path"]:
             shutil.rmtree(state["work_dir"], ignore_errors=True)
 
+        temp_pl_fd, temp_pl_path = tempfile.mkstemp(suffix=".pl", prefix="ld_upload_")
+        os.close(temp_pl_fd)
+        file.save(temp_pl_path)
+
         try:
-            work_dir = extract_pl_to_temp(path)
+            work_dir = extract_pl_to_temp(temp_pl_path)
         except (ValueError, zipfile.BadZipFile) as e:
             return jsonify({"error": str(e)}), 400
-        state["pl_path"] = path
+            
+        state["pl_path"] = temp_pl_path
         state["work_dir"] = work_dir
+        path_name = request.form.get("filename", file.filename)
+        state["original_filename"] = path_name
 
     else:  # folder
-        path = filedialog.askdirectory(title="LDプロジェクトフォルダを選択")
-        root.destroy()
-        if not path:
-            return jsonify({"error": "キャンセルされました"}), 400
+        files = request.files.getlist("files")
+        paths = request.form.getlist("paths")
+        if not files or not paths:
+            return jsonify({"error": "ファイルがアップロードされていません"}), 400
+            
+        work_dir = tempfile.mkdtemp(prefix="ld_upload_dir_")
+        
+        for f, rel_path in zip(files, paths):
+            parts = rel_path.replace('\\', '/').split('/')
+            if len(parts) > 1:
+                rel_val = "/".join(parts[1:])
+            else:
+                rel_val = parts[0]
+                
+            target_path = os.path.join(work_dir, rel_val)
+            os.makedirs(os.path.dirname(target_path), exist_ok=True)
+            f.save(target_path)
+            
         state["pl_path"] = None
-        state["work_dir"] = path
+        state["work_dir"] = work_dir
+        path_name = parts[0] if parts else "Uploaded Folder"
+        state["original_filename"] = path_name
 
     sqlite_path = os.path.join(state["work_dir"], "PlaceCache.sqlite")
     if not os.path.exists(sqlite_path):
@@ -2900,11 +2941,11 @@ def update_action_execution_type(action_id):
 def save():
     if not state["pl_path"]:
         return jsonify({"error": "フォルダモードでは保存できません（.plファイルを開いてください）"}), 400
-    if not state["dirty"]:
-        return jsonify({"ok": True, "message": "変更なし"})
     try:
-        save_back_to_pl()
-        return jsonify({"ok": True})
+        if state["dirty"]:
+            save_back_to_pl()
+        filename = state.get("original_filename", "project.pl")
+        return send_file(state["pl_path"], as_attachment=True, download_name=filename)
     except Exception as e:
         app.logger.error(f"[save] Error: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
