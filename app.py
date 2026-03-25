@@ -36,6 +36,72 @@ state = {
 SQL_INSTANCE = r".\LUTRON2022"
 
 
+def diagnose_sql():
+    """Return a human-readable diagnostic string for SQL Server connectivity."""
+    lines = []
+
+    if not PYODBC_OK:
+        lines.append("❌ pyodbc 未インストール (pip install pyodbc)")
+        return "\n".join(lines)
+
+    # Installed ODBC drivers
+    available = pyodbc.drivers()
+    sql_drivers = [d for d in available if "SQL" in d.upper()]
+    if sql_drivers:
+        lines.append(f"✅ ODBCドライバー: {', '.join(sql_drivers)}")
+    else:
+        lines.append("❌ SQL Server用ODBCドライバーなし → msodbcsql17.msi をインストールしてください")
+
+    # Registry: enumerate installed SQL Server instances
+    lutron_instances = []
+    try:
+        import winreg
+        key = winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"SOFTWARE\Microsoft\Microsoft SQL Server\Instance Names\SQL",
+        )
+        i = 0
+        while True:
+            try:
+                name, _, _ = winreg.EnumValue(key, i)
+                i += 1
+                if "LUTRON" in name.upper():
+                    lutron_instances.append(name)
+            except OSError:
+                break
+        winreg.CloseKey(key)
+    except OSError:
+        pass
+
+    if lutron_instances:
+        lines.append(f"✅ LUTRONインスタンス(レジストリ): {', '.join(lutron_instances)}")
+    else:
+        lines.append("❌ レジストリにLUTRONインスタンスなし → Lutron Designerが正常にインストールされていない可能性")
+
+    # Check configured instance matches registry
+    configured = SQL_INSTANCE.lstrip(".\\").lstrip("./")
+    lines.append(f"ℹ️  接続先インスタンス: {SQL_INSTANCE}")
+    if lutron_instances and configured.upper() not in [n.upper() for n in lutron_instances]:
+        lines.append(f"⚠️  '{configured}' はレジストリ未検出。実在するインスタンス: {', '.join(lutron_instances)}")
+
+    # Live connection test per driver
+    lines.append("--- 接続テスト ---")
+    for drv in ["ODBC Driver 17 for SQL Server", "SQL Server Native Client 11.0", "SQL Server"]:
+        if drv not in available:
+            lines.append(f"  スキップ (未インストール): {drv}")
+            continue
+        try:
+            c = pyodbc.connect(
+                f"DRIVER={{{drv}}};SERVER={SQL_INSTANCE};DATABASE=master;Trusted_Connection=yes;",
+                timeout=5,
+            )
+            c.close()
+            lines.append(f"  ✅ {drv}")
+        except pyodbc.Error as e:
+            lines.append(f"  ❌ {drv}: {e}")
+    return "\n".join(lines)
+
+
 def _run_sql_admin(sql, timeout=120):
     """Run a DDL statement (RESTORE/BACKUP/DROP) against master with autocommit."""
     conn = None
@@ -50,7 +116,7 @@ def _run_sql_admin(sql, timeout=120):
         except pyodbc.Error:
             continue
     if conn is None:
-        raise RuntimeError("SQL Server に接続できません")
+        raise RuntimeError("SQL Server に接続できません\n\n" + diagnose_sql())
     conn.timeout = timeout
     cur = conn.cursor()
     try:
@@ -89,7 +155,7 @@ def sql_conn():
             )
         except pyodbc.Error:
             continue
-    raise RuntimeError("SQL Server に接続できません")
+    raise RuntimeError("SQL Server に接続できません\n\n" + diagnose_sql())
 
 
 def q(sql, params=()):
@@ -415,6 +481,12 @@ def save_back_to_pl():
 @app.route("/")
 def index():
     return send_from_directory("static", "index.html")
+
+
+@app.route("/api/diagnostics")
+def get_diagnostics():
+    """Return SQL Server connectivity diagnostics."""
+    return jsonify({"report": diagnose_sql()})
 
 
 @app.route("/api/open", methods=["POST"])
