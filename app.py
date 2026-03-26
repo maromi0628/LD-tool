@@ -35,6 +35,7 @@ state = {
 
 def _detect_sql_instance():
     """Auto-detect the installed LUTRON SQL Server instance from the registry.
+    If multiple LUTRON instances exist, prefer the one with the highest version number.
     Falls back to LUTRON2022 if none found."""
     try:
         import winreg
@@ -42,17 +43,21 @@ def _detect_sql_instance():
             winreg.HKEY_LOCAL_MACHINE,
             r"SOFTWARE\Microsoft\Microsoft SQL Server\Instance Names\SQL",
         )
+        lutron_names = []
         i = 0
         while True:
             try:
                 name, _, _ = winreg.EnumValue(key, i)
                 i += 1
                 if "LUTRON" in name.upper():
-                    winreg.CloseKey(key)
-                    return rf".\{name}"
+                    lutron_names.append(name)
             except OSError:
                 break
         winreg.CloseKey(key)
+        if lutron_names:
+            # Pick the instance with the highest trailing year/number (e.g. LUTRON2022 > LUTRON2019)
+            lutron_names.sort(key=lambda n: int(''.join(filter(str.isdigit, n)) or '0'), reverse=True)
+            return rf".\{lutron_names[0]}"
     except OSError:
         pass
     return r".\LUTRON2022"
@@ -573,13 +578,20 @@ def open_file():
     try:
         load_project(state["work_dir"])
     except Exception as e:
+        err_str = str(e)
+        if "3169" in err_str or "version 16" in err_str or "incompatible with this server" in err_str:
+            return jsonify({"error": (
+                "SQL Server バージョン不一致エラー: このバックアップは SQL Server 2022 (v16) で作成されましたが、"
+                "このPCには古いバージョン (SQL Server 2019 など) がインストールされています。\n"
+                "解決方法: このPCに SQL Server 2022 をインストールしてください。"
+            )}), 500
         return jsonify({"error": f"SQL Server復元失敗: {e}"}), 500
 
     templates = list_template_zips(state["work_dir"])
 
     return jsonify({
-        "path": path,
-        "name": os.path.basename(path),
+        "path": path_name,
+        "name": os.path.basename(path_name),
         "is_pl": mode == "pl",
         "has_template": state["db_name"] is not None,
         "templates": templates,

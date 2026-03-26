@@ -1251,8 +1251,10 @@
         <h1>Lutron Designer Viewer</h1>
         <div class="spacer"></div>
         <div class="btn-group">
-            <button class="btn btn-primary" onclick="openFile('pl')">📄 .plを開く</button>
-            <button class="btn btn-outline" onclick="openFile('folder')">📁 フォルダを開く</button>
+            <input type="file" id="file-input-pl" accept=".pl" style="display:none;" onchange="handleFileUpload(event, 'pl')">
+            <input type="file" id="file-input-folder" webkitdirectory directory multiple style="display:none;" onchange="handleFileUpload(event, 'folder')">
+            <button class="btn btn-primary" onclick="document.getElementById('file-input-pl').click()">📄 .plを開く</button>
+            <button class="btn btn-outline" onclick="document.getElementById('file-input-folder').click()">📁 フォルダを開く</button>
             <button class="btn btn-success" id="save-btn" onclick="saveFile()" disabled>💾 保存</button>
         </div>
     </header>
@@ -1341,30 +1343,53 @@
             7: 'CCO Maintained', 8: 'CCO Pulsed', 9: 'HVAC', 10: 'Venetian Blind'
         };
 
-        // ── Open file/folder ─────────────────────────
-        async function openFile(mode) {
-            const res = await fetch('/api/open', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ mode })
-            });
-            if (!res.ok) {
-                const e = await res.json();
-                const msg = e.error || 'エラー';
-                if (msg.includes('\n')) { _showDiagModal(msg); } else { toast(msg, 'red'); }
-                return;
+        // ── Open file/folder via upload ─────────────────────────
+        async function handleFileUpload(event, mode) {
+            const files = event.target.files;
+            if (!files || files.length === 0) return;
+            
+            const formData = new FormData();
+            formData.append('mode', mode);
+            
+            if (mode === 'pl') {
+                formData.append('file', files[0]);
+                formData.append('filename', files[0].name);
+            } else {
+                for (let i = 0; i < files.length; i++) {
+                    const f = files[i];
+                    formData.append('files', f);
+                    formData.append('paths', f.webkitRelativePath);
+                }
             }
-            const data = await res.json();
-            isPl = data.is_pl;
-            document.getElementById('save-btn').disabled = !isPl;
-            fsTemplates = data.templates || [];
-            // Reset all caches when a new file is loaded
-            _variablesCache = null; _ledsCache = null; _condDataCache = null;
-            await loadOverview();
-            updateTemplateBar(data.active_template);
-            await loadTree();
-            if (currentAreaId) loadDetail(currentAreaId, '');
-            toast(`${data.name} を開きました`);
+
+            document.getElementById('detail').innerHTML = '<div class="loading">アップロード＆読み込み中...</div>';
+            
+            try {
+                const res = await fetch('/api/open', {
+                    method: 'POST',
+                    body: formData
+                });
+                if (!res.ok) {
+                    const e = await res.json();
+                    const msg = e.error || 'エラー';
+                    if (msg.includes('\n')) { _showDiagModal(msg); } else { toast(msg, 'red'); }
+                    return;
+                }
+                const data = await res.json();
+                isPl = data.is_pl;
+                document.getElementById('save-btn').disabled = !isPl;
+                fsTemplates = data.templates || [];
+                _variablesCache = null; _ledsCache = null; _condDataCache = null;
+                await loadOverview();
+                updateTemplateBar(data.active_template);
+                await loadTree();
+                if (currentAreaId) loadDetail(currentAreaId, '');
+                toast(`${data.name} を開きました`);
+            } catch (err) {
+                toast('通信エラー: ' + err.message, 'red');
+            } finally {
+                event.target.value = '';
+            }
         }
 
         // ── Template switcher ─────────────────────────
