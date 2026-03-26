@@ -705,6 +705,20 @@ def area_detail(area_id):
     })
 
 
+@app.route("/api/area/<int:area_id>/shared-presets")
+def area_shared_presets(area_id):
+    """Return shared presets (PresetType=3) belonging to this area."""
+    if not state["db_name"]:
+        return jsonify([])
+    rows = q("""
+        SELECT p.PresetID, p.Name, p.SortOrder
+        FROM tblPreset p
+        WHERE p.PresetType = 3 AND p.ParentType = 2 AND p.ParentID = ?
+        ORDER BY p.SortOrder, p.Name
+    """, (area_id,))
+    return jsonify(rows)
+
+
 # ── Load type master ──────────────────────────
 
 @app.route("/api/load-types")
@@ -2219,6 +2233,29 @@ def cond_debug():
             WHERE pa.AssignableObjectType IN (19, 38, 400)
             ORDER BY pa.AssignableObjectType, pa.PresetAssignmentID, acp.SortOrder
         """),
+        "shared_scene_area_assignments": q("""
+            SELECT TOP 30
+                   p.PresetID, p.Name AS PresetName, p.SortOrder AS PresetSortOrder,
+                   pa.PresetAssignmentID, pa.AssignmentCommandType, pa.AssignmentCommandGroup,
+                   a.AreaID, a.Name AS AreaName,
+                   acp.ParameterType, acp.ParameterValue
+            FROM tblPreset p
+            JOIN tblPresetAssignment pa ON pa.ParentID = p.PresetID
+            LEFT JOIN tblArea a ON a.AreaID = pa.AssignableObjectID
+            LEFT JOIN tblAssignmentCommandParameter acp ON acp.ParentId = pa.PresetAssignmentID
+            WHERE p.PresetType = 3 AND p.ParentType = 2
+              AND pa.AssignableObjectType = 2
+            ORDER BY p.SortOrder, pa.PresetAssignmentID, acp.ParameterType
+        """),
+        "area_scenes_sample": q("""
+            SELECT TOP 20 sc.ParentID AS AreaID, a.Name AS AreaName,
+                   s.SceneID, s.Name AS SceneName, s.Number, s.SortOrder
+            FROM tblSceneController sc
+            JOIN tblScene s ON s.ParentSceneControllerID = sc.SceneControllerID
+            JOIN tblArea a ON a.AreaID = sc.ParentID
+            WHERE sc.ParentType = 2
+            ORDER BY sc.ParentID, s.Number
+        """),
     })
 
 
@@ -2507,6 +2544,21 @@ _ZONE_CMD_MAP = {
 }
 
 
+# ── Preset name update ─────────────────────────────────────────────────────────
+
+@app.route("/api/preset/<int:preset_id>/name", methods=["PUT"])
+def update_preset_name(preset_id):
+    """Rename a preset (shared scene or button-local)."""
+    if not state["db_name"]:
+        return jsonify({"error": "DB未接続"}), 400
+    data = request.json or {}
+    name = data.get("name", "").strip()
+    if not name:
+        return jsonify({"error": "名前が空です"}), 400
+    execute_sql("UPDATE tblPreset SET Name=?, NeedsTransfer=1 WHERE PresetID=?", (name, preset_id))
+    return jsonify({"ok": True})
+
+
 # ── Assignments for action presets ─────────────────────────────────────────────
 
 @app.route("/api/preset/<int:preset_id>/assignments", methods=["GET"])
@@ -2608,8 +2660,8 @@ def list_preset_assignments(preset_id):
         pm = {p["ParameterType"]: p["ParameterValue"] for p in params}
         a["_params"] = pm   # keep raw for debugging
 
-        a["fade"]  = pm.get(1, 0)
-        a["delay"] = pm.get(2, 0)
+        a["fade"]  = round(pm.get(1, 0) / 4, 2)  # Lutron stores in 250ms units; convert to seconds
+        a["delay"] = round(pm.get(2, 0) / 4, 2)
 
         if ot == 198:
             # Legacy: level stored 0–10000, normalise to 0–100 for UI
@@ -2623,7 +2675,10 @@ def list_preset_assignments(preset_id):
             else:
                 a["level"] = None               # CCO Pulsed – no level
         elif ot == 2:
-            a["level"] = pm.get(3, 100)         # Area level 0–100
+            if ct == 5:   # Shared Scene recall: scene Number stored in PT=7
+                a["level"] = pm.get(7)
+            else:         # Regular area level: PT=3, 0–100
+                a["level"] = pm.get(3, 100)
         elif ot == 38:
             a["level"] = pm.get(35, 1)          # Occupancy state 1/2/4
         elif ot == 400:
@@ -2653,6 +2708,28 @@ def list_preset_assignments(preset_id):
         else:
             a["StateName"] = None
 
+    # If ?shared=1, enrich area assignments with scene info from tblScene
+    if request.args.get("shared") == "1":
+        prows = _try_q("SELECT SortOrder FROM tblPreset WHERE PresetID = ?", (preset_id,))
+        scene_num = prows[0]["SortOrder"] if prows else None
+        for a in assignments:
+            if a.get("AssignableObjectType") == 2:
+                area_id = a["AssignableObjectID"]
+                area_scenes = _try_q("""
+                    SELECT s.SceneID, s.Name, s.Number
+                    FROM tblSceneController sc
+                    JOIN tblScene s ON s.ParentSceneControllerID = sc.SceneControllerID
+                    WHERE sc.ParentID = ? AND sc.ParentType = 2
+                    ORDER BY s.Number
+                """, (area_id,))
+                a["area_scenes"] = area_scenes
+                # PT=3 stores the scene number to recall; fall back to preset SortOrder
+                area_scene_num = a.get("level") if a.get("level") is not None else scene_num
+                matched = [s for s in area_scenes if s["Number"] == area_scene_num]
+                a["area_scene_name"] = matched[0]["Name"] if matched else None
+                # Ensure level reflects the resolved scene number so the dropdown selects correctly
+                a["level"] = area_scene_num
+
     return jsonify(assignments)
 
 
@@ -2678,12 +2755,12 @@ def add_preset_assignment(preset_id):
         if existing:
             return jsonify({"error": "このゾーンはすでに割り当て済みです"}), 400
         level = int(data.get("level", 100))
-        fade  = int(data.get("fade",  0))
-        delay = int(data.get("delay", 0))
+        fade  = round(float(data.get("fade",  0)) * 4)  # seconds → 250ms units
+        delay = round(float(data.get("delay", 0)) * 4)
         if lv_param is not None:
             params = [(0, 1, fade), (1, 2, delay), (2, lv_param, level)]
         else:
-            params = [(0, 2, delay)]  # CCO Pulsed: no level
+            params = [(0, 1, fade), (1, 2, delay)]  # CCO Pulsed: no level, but has pulse duration
 
     elif item_type == "shade":
         item_id = data.get("item_id")
@@ -2695,7 +2772,7 @@ def add_preset_assignment(preset_id):
         if existing:
             return jsonify({"error": "このシェードグループはすでに割り当て済みです"}), 400
         pos = int(data.get("level", 0))
-        params = [(0, 2, int(data.get("delay", 0))), (1, 7, pos)]
+        params = [(0, 2, round(float(data.get("delay", 0)) * 4)), (1, 7, pos)]
 
     elif item_type == "device":
         item_id = data.get("item_id")
@@ -2707,7 +2784,7 @@ def add_preset_assignment(preset_id):
         if existing:
             return jsonify({"error": "このデバイスはすでに割り当て済みです"}), 400
         lock_val = int(data.get("level", 1))  # 1=Lock, 2=Unlock
-        params = [(0, 22, lock_val), (1, 29, 0), (2, 2, int(data.get("delay", 0)))]
+        params = [(0, 22, lock_val), (1, 29, 0), (2, 2, round(float(data.get("delay", 0)) * 4))]
 
     elif item_type == "sequence":
         item_id = data.get("item_id")
@@ -2721,7 +2798,7 @@ def add_preset_assignment(preset_id):
                      (preset_id, item_id, cmd_type))
         if existing:
             return jsonify({"error": "このシーケンスはすでに割り当て済みです"}), 400
-        params = [(0, 2, int(data.get("delay", 0)))]
+        params = [(0, 2, round(float(data.get("delay", 0)) * 4))]
 
     elif item_type == "variable":
         item_id  = data.get("item_id")
@@ -2736,21 +2813,30 @@ def add_preset_assignment(preset_id):
                      (preset_id, item_id, state_id))
         if existing:
             return jsonify({"error": "この変数とステートの組み合わせはすでに割り当て済みです"}), 400
-        params = [(0, 32, int(state_id)), (1, 2, int(data.get("delay", 0)))]
+        params = [(0, 32, int(state_id)), (1, 2, round(float(data.get("delay", 0)) * 4))]
 
     elif item_type == "area":
         item_id = data.get("item_id")
         if item_id is None:
             return jsonify({"error": "item_id が必要です"}), 400
-        obj_type, cmd_type, cmd_group = 2, 2, 1
         existing = q("SELECT PresetAssignmentID FROM tblPresetAssignment WHERE ParentID=? AND AssignableObjectID=? AND AssignableObjectType=2",
                      (preset_id, item_id))
         if existing:
             return jsonify({"error": "このエリアはすでに割り当て済みです"}), 400
-        level = int(data.get("level", 100))
-        fade  = int(data.get("fade",  0))
-        delay = int(data.get("delay", 0))
-        params = [(0, 1, fade), (1, 2, delay), (2, 3, level)]
+        # Shared Scenes (PresetType=3) use cmd_type=5/group=3 and store scene# in PT=7
+        prow = q("SELECT PresetType FROM tblPreset WHERE PresetID=?", (preset_id,))
+        is_shared = prow and prow[0]["PresetType"] == 3
+        if is_shared:
+            obj_type, cmd_type, cmd_group = 2, 5, 3
+            scene_num = int(data.get("level", 1))  # default to scene 1
+            delay = round(float(data.get("delay", 0)) * 4)
+            params = [(0, 2, delay), (1, 7, scene_num)]
+        else:
+            obj_type, cmd_type, cmd_group = 2, 2, 1
+            level = int(data.get("level", 100))
+            fade  = round(float(data.get("fade",  0)) * 4)
+            delay = round(float(data.get("delay", 0)) * 4)
+            params = [(0, 1, fade), (1, 2, delay), (2, 3, level)]
 
     elif item_type == "hvac":
         item_id = data.get("item_id")
@@ -2775,7 +2861,7 @@ def add_preset_assignment(preset_id):
                      (preset_id, item_id, cmd_type))
         if existing:
             return jsonify({"error": "このタイムクロックはすでに割り当て済みです"}), 400
-        delay = int(data.get("delay", 0))
+        delay = round(float(data.get("delay", 0)) * 4)
         params = [(0, 2, delay)]
 
     elif item_type == "occupancy":
@@ -2789,7 +2875,7 @@ def add_preset_assignment(preset_id):
         if existing:
             return jsonify({"error": "このOccupancy Groupはすでに割り当て済みです"}), 400
         state_val = int(data.get("level", 1))  # 1=Occupied, 2=Unoccupied, 4=Bypass
-        delay = int(data.get("delay", 0))
+        delay = round(float(data.get("delay", 0)) * 4)
         params = [(0, 35, state_val), (1, 2, delay)]
 
     elif item_type == "roomprop":
@@ -2807,7 +2893,7 @@ def add_preset_assignment(preset_id):
             val = int(props.get(str(prop_id_int), UNAFFECTED))
             params.append((pt - 76, pt, val))
         params.append((5, 81, UNAFFECTED))
-        params.append((6, 2, delay))
+        params.append((6, 2, round(float(data.get("delay", 0)) * 4)))
 
     elif item_type == "integration":
         # ObjType=202 (IntegrationCommandSet), confirmed CmdType=52, CmdGroup=36
@@ -2861,8 +2947,8 @@ def update_assignment(assignment_id):
 
     # Build param-type → value mapping
     mapping = {}
-    if "fade"  in data: mapping[1]  = int(data["fade"])
-    if "delay" in data: mapping[2]  = int(data["delay"])
+    if "fade"  in data: mapping[1]  = round(float(data["fade"]) * 4)   # seconds → 250ms units
+    if "delay" in data: mapping[2]  = round(float(data["delay"]) * 4)
     if "state_id" in data: mapping[32] = int(data["state_id"])
 
     if "level" in data:
@@ -2880,7 +2966,10 @@ def update_assignment(assignment_id):
                 elif ct == 18:
                     mapping[18] = int(data["level"])   # CCO Maintained: ParamType 18, 0/100
             elif ot == 2:
-                mapping[3]  = int(data["level"])       # Area level: ParamType 3, 0–100
+                if ct == 5:  # Shared Scene recall: scene Number in PT=7
+                    mapping[7] = int(data["level"])
+                else:        # Regular area level: PT=3, 0–100
+                    mapping[3] = int(data["level"])
             elif ot == 38:
                 mapping[35] = int(data["level"])       # Occupancy state: ParamType 35
             # Room property: handled separately via "props" field, not "level"

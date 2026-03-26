@@ -1053,6 +1053,98 @@
             color: var(--teal);
         }
 
+        /* ── Shared Scenes tab (LD-like 2-pane layout) ── */
+        .ssc-layout {
+            display: flex;
+            height: 100%;
+            min-height: 300px;
+        }
+
+        .ssc-list {
+            width: 220px;
+            min-width: 160px;
+            flex-shrink: 0;
+            border-right: 1px solid var(--border);
+            overflow-y: auto;
+            background: var(--surface);
+        }
+
+        .ssc-list-item {
+            padding: 7px 12px;
+            font-size: 11px;
+            cursor: pointer;
+            border-bottom: 1px solid var(--border);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            color: var(--text);
+        }
+
+        .ssc-list-item:hover { background: var(--surface2); }
+        .ssc-list-item.active {
+            background: var(--accent);
+            color: #fff;
+            font-weight: 600;
+        }
+
+        .ssc-detail-pane {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .ssc-detail-name {
+            font-size: 12px;
+            font-weight: 600;
+            flex: 1;
+        }
+
+        .ssc-detail-body {
+            flex: 1;
+            overflow-y: auto;
+            padding: 6px 12px;
+        }
+
+        .ssc-name-input {
+            flex: 1;
+            font-size: 12px;
+            font-weight: 600;
+            background: var(--surface);
+            border: 1px solid var(--accent);
+            border-radius: 4px;
+            color: var(--text);
+            padding: 1px 6px;
+            outline: none;
+        }
+        .ssc-cat-group {
+            font-size: 10px; font-weight: 600; padding: 5px 2px 2px;
+            color: var(--text-dim); border-top: 1px solid var(--border);
+            margin-top: 3px; text-transform: uppercase; letter-spacing: 0.04em;
+        }
+        .ssc-cat-row {
+            display: flex; align-items: center; gap: 5px;
+            padding: 2px 2px; font-size: 11px; border-radius: 3px;
+        }
+        .ssc-cat-row:hover { background: var(--surface2); }
+        .ssc-cat-label {
+            min-width: 100px; max-width: 220px;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+            cursor: pointer; user-select: none;
+        }
+
+        .ssc-edit-btn {
+            background: none;
+            border: none;
+            cursor: pointer;
+            color: var(--text-dim);
+            font-size: 12px;
+            padding: 0 2px;
+            line-height: 1;
+        }
+
+        .ssc-edit-btn:hover { color: var(--accent); }
+
         .btn {
             padding: 6px 14px;
             border-radius: 5px;
@@ -1519,6 +1611,7 @@
         <div class="detail-tab ${tab === 'scenes' ? 'active' : ''}" onclick="switchDetailTab('scenes',${areaId},'${areaName.replace(/'/g, "\\'")}')">Scenes</div>
         <div class="detail-tab ${tab === 'keypads' ? 'active' : ''}" onclick="switchDetailTab('keypads',${areaId},'${areaName.replace(/'/g, "\\'")}')">Keypads</div>
         <div class="detail-tab ${tab === 'programs' ? 'active' : ''}" onclick="switchDetailTab('programs',${areaId},'${areaName.replace(/'/g, "\\'")}')">Programs</div>
+        <div class="detail-tab ${tab === 'shared-scenes' ? 'active' : ''}" onclick="switchDetailTab('shared-scenes',${areaId},'${areaName.replace(/'/g, "\\'")}')">Shared Scenes</div>
       </div>
       <div id="tab-zones" class="tab-panel ${tab === 'zones' ? 'active' : ''}">
         ${d.zones.length ? zonesTableHtml(d.zones, areaId) : '<div class="loading" style="padding:16px">Zonesなし</div>'}
@@ -1532,6 +1625,9 @@
       <div id="tab-programs" class="tab-panel ${tab === 'programs' ? 'active' : ''}">
         ${renderProgramsTab(prog)}
       </div>
+      <div id="tab-shared-scenes" class="tab-panel ${tab === 'shared-scenes' ? 'active' : ''}">
+        <div class="loading" style="padding:16px">読み込み中…</div>
+      </div>
     </div>
   `;
         }
@@ -1541,10 +1637,11 @@
             document.querySelectorAll('.detail-tab').forEach(t => t.classList.remove('active'));
             document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
             const tabs = document.querySelectorAll('.detail-tab');
-            const tabOrder = ['zones', 'scenes', 'keypads', 'programs'];
+            const tabOrder = ['zones', 'scenes', 'keypads', 'programs', 'shared-scenes'];
             const idx = tabOrder.indexOf(tabName);
             if (tabs[idx]) tabs[idx].classList.add('active');
             document.getElementById('tab-' + tabName).classList.add('active');
+            if (tabName === 'shared-scenes') loadSharedScenes(areaId);
         }
 
         // ── Zones ─────────────────────────────────────
@@ -1650,6 +1747,428 @@
         function renderScenesCard(scenes) {
             if (!scenes.length) return '';
             return `<div class="card"><div class="card-header">Scenes <span class="count">${scenes.length}</span></div>${scenesBodyHtml(scenes)}</div>`;
+        }
+
+        // ── Shared Scenes ─────────────────────────────
+        let _sscPresets = [];   // loaded preset list for current area
+        let _sscAreaId = null;
+        let _sscCategory = 'zones';   // selected category in LD-style view
+        let _sscCondData = null;       // cached condition data
+
+        async function loadSharedScenes(areaId) {
+            const panel = document.getElementById('tab-shared-scenes');
+            if (!panel) return;
+            _sscAreaId = areaId;
+            panel.innerHTML = '<div class="loading" style="padding:16px">読み込み中…</div>';
+            try {
+                const res = await fetch(`/api/area/${areaId}/shared-presets`);
+                _sscPresets = await res.json();
+                if (!_sscPresets.length) {
+                    panel.innerHTML = '<div class="loading" style="padding:16px">Shared Scenesなし</div>';
+                    return;
+                }
+                panel.innerHTML = `
+<div class="ssc-layout">
+  <div class="ssc-list" id="ssc-list"></div>
+  <div class="ssc-detail-pane">
+    <div id="ssc-detail-body" class="ssc-detail-body">
+      <div style="color:var(--text-dim);font-size:11px;padding:8px">シーンを選択してください</div>
+    </div>
+  </div>
+</div>`;
+                _renderSscList();
+                selectSharedScene(_sscPresets[0].PresetID, _sscPresets[0].Name);
+            } catch (e) {
+                panel.innerHTML = '<div class="loading" style="padding:16px;color:var(--red)">読み込みエラー</div>';
+            }
+        }
+
+        function _renderSscList() {
+            const listEl = document.getElementById('ssc-list');
+            if (!listEl) return;
+            listEl.innerHTML = _sscPresets.map(p =>
+                `<div class="ssc-list-item" id="sscli-${p.PresetID}"
+                      onclick="selectSharedScene(${p.PresetID},'${p.Name.replace(/'/g,"\\'")}')"
+                >${escHtml(p.Name)}</div>`
+            ).join('');
+        }
+
+        let _sscCurrentPresetId = null;
+        let _sscCurrentName = '';
+
+        async function selectSharedScene(presetId, name) {
+            _sscCurrentPresetId = presetId;
+            _sscCurrentName = name || (_sscPresets.find(p => p.PresetID === presetId)?.Name ?? '');
+            // Highlight list item
+            document.querySelectorAll('.ssc-list-item').forEach(el => el.classList.remove('active'));
+            const li = document.getElementById(`sscli-${presetId}`);
+            if (li) li.classList.add('active');
+            // Load assignments (name is rendered inside body)
+            await _loadSharedSceneDetail(presetId);
+        }
+
+        async function _loadSharedSceneDetail(presetId) {
+            const body = document.getElementById('ssc-detail-body');
+            if (!body) return;
+            body.innerHTML = '<div style="color:var(--text-dim);font-size:11px;padding:8px">読み込み中…</div>';
+            try {
+                const [assRes, varRes, cd] = await Promise.all([
+                    fetch(`/api/preset/${presetId}/assignments?shared=1`),
+                    loadVariables(),
+                    loadCondData(),
+                ]);
+                const assignments = await assRes.json();
+                _assignmentDataMap = {};
+                assignments.forEach(a => { _assignmentDataMap[a.PresetAssignmentID] = a; });
+                _sscCondData = cd;
+                _renderSharedSceneAssignments(presetId, assignments, varRes, cd);
+            } catch (e) {
+                const b = document.getElementById('ssc-detail-body');
+                if (b) b.innerHTML = '<div style="color:var(--red);font-size:11px;padding:8px">読み込みエラー</div>';
+            }
+        }
+
+        // ── SSC category (LD-style) rendering ─────────────────────────────────────
+        function _sscSetCategory(cat, presetId) {
+            _sscCategory = cat;
+            _loadSharedSceneDetail(presetId);
+        }
+
+        async function _sscToggleItem(checked, presetId, itemType, itemId, ctrl, existingAid) {
+            if (checked) {
+                const body = { item_type: itemType, item_id: itemId, delay: 0 };
+                if (itemType === 'zone' || itemType === 'cco') {
+                    if (ctrl === 8) { body.fade = 0.25; }
+                    else { body.level = 100; body.fade = 2; }
+                } else if (itemType === 'area') {
+                    body.fade = 2;
+                } else if (itemType === 'shade') {
+                    body.level = 0;
+                } else if (itemType === 'sequence') {
+                    body.cmd_type = 21;
+                } else if (itemType === 'timeclock') {
+                    body.cmd_type = 36;
+                } else if (itemType === 'occupancy') {
+                    body.level = 1;
+                } else if (itemType === 'device') {
+                    body.level = 1;
+                }
+                const res = await fetch(`/api/preset/${presetId}/assignments`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body),
+                });
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({}));
+                    toast(err.error || '追加エラー', 'red');
+                    _loadSharedSceneDetail(presetId); // reset checkbox
+                    return;
+                }
+            } else {
+                if (existingAid === null) return;
+                await fetch(`/api/assignment/${existingAid}`, { method: 'DELETE' });
+            }
+            markDirty();
+            _loadSharedSceneDetail(presetId);
+        }
+
+        async function _sscToggleVarState(checked, presetId, varId, stateId, existingAid) {
+            if (checked) {
+                const res = await fetch(`/api/preset/${presetId}/assignments`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ item_type: 'variable', item_id: varId, state_id: stateId, delay: 0 }),
+                });
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({}));
+                    toast(err.error || '追加エラー', 'red');
+                    _loadSharedSceneDetail(presetId);
+                    return;
+                }
+            } else {
+                if (existingAid === null) return;
+                await fetch(`/api/assignment/${existingAid}`, { method: 'DELETE' });
+            }
+            markDirty();
+            _loadSharedSceneDetail(presetId);
+        }
+
+        function _sscCategoryHtml(presetId, assignments, variables, cd) {
+            const asnMap = {};
+            assignments.forEach(a => {
+                const k = `${a.AssignableObjectType}:${a.AssignableObjectID}`;
+                if (!asnMap[k]) asnMap[k] = a;
+            });
+            function getAsn(ot, oid) { return asnMap[`${ot}:${oid}`] || (ot === 15 ? asnMap[`198:${oid}`] : null); }
+            function dBtn(aid) { return `<button class="prog-del-btn" onclick="_sscRemoveAssignment(${aid},${presetId})">✕</button>`; }
+            function delayCtrl(aid, val) {
+                return `<label style="color:var(--text-dim)">Delay</label><input type="number" class="action-param-input" min="0" max="3600" value="${val}" onchange="_updateAssignParam(${aid},{delay:parseFloat(this.value)||0})"><span style="color:var(--text-dim)">s</span>`;
+            }
+            function groupByArea(items, nameKey, areaKey) {
+                const groups = {}, order = [];
+                items.forEach(it => {
+                    const k = it[areaKey] || '─';
+                    if (!groups[k]) { groups[k] = []; order.push(k); }
+                    groups[k].push(it);
+                });
+                return { groups, order };
+            }
+
+            const cat = _sscCategory;
+            let html = '';
+
+            // ── Lighting - Zones ──────────────────────────────────────
+            if (cat === 'zones' || cat === 'cco') {
+                const items = cat === 'zones' ? (cd.zones || []) : (cd.cco || []);
+                if (!items.length) return '<div style="color:var(--text-dim);font-size:11px;padding:4px">データなし</div>';
+                const { groups, order } = groupByArea(items, 'ZoneName', 'AreaName');
+                order.forEach(area => {
+                    html += `<div class="ssc-cat-group">${escHtml(area)}</div>`;
+                    groups[area].forEach(z => {
+                        const a = getAsn(15, z.ZoneID);
+                        const ctrl = z.ControlType || 1;
+                        const cid = `ssc-z-${z.ZoneID}`;
+                        if (a) {
+                            const aid = a.PresetAssignmentID;
+                            html += `<div class="ssc-cat-row"><input type="checkbox" id="${cid}" checked onchange="_sscToggleItem(this.checked,${presetId},'${cat}',${z.ZoneID},${ctrl},${aid})"><label for="${cid}" class="ssc-cat-label">${escHtml(z.ZoneName)}</label>${_zoneLevelHTML(aid,ctrl,a.level,a.fade)}${delayCtrl(aid,a.delay??0)}${dBtn(aid)}</div>`;
+                        } else {
+                            html += `<div class="ssc-cat-row"><input type="checkbox" id="${cid}" onchange="_sscToggleItem(this.checked,${presetId},'${cat}',${z.ZoneID},${ctrl},null)"><label for="${cid}" class="ssc-cat-label">${escHtml(z.ZoneName)}</label></div>`;
+                        }
+                    });
+                });
+                return html;
+            }
+
+            // ── Lighting - Areas ──────────────────────────────────────
+            if (cat === 'areas') {
+                (cd.areas || []).forEach(ar => {
+                    const a = getAsn(2, ar.AreaID);
+                    const lbl = ar.ParentAreaName ? `${ar.ParentAreaName} > ${ar.AreaName}` : ar.AreaName;
+                    const cid = `ssc-ar-${ar.AreaID}`;
+                    if (a) {
+                        const aid = a.PresetAssignmentID;
+                        const areaScenes = a.area_scenes || [];
+                        const sceneOpts = areaScenes.map(s =>
+                            `<option value="${s.Number}"${s.Number === a.level ? ' selected' : ''}>${escHtml(s.Name)}</option>`
+                        ).join('');
+                        const sceneCtrl = areaScenes.length
+                            ? `<select class="action-param-input" style="min-width:100px" onchange="_updateAssignParam(${aid},{level:parseInt(this.value)})">${sceneOpts}</select>`
+                            : `<span style="color:var(--text-dim);font-size:11px">${escHtml(a.area_scene_name || '─')}</span>`;
+                        html += `<div class="ssc-cat-row"><input type="checkbox" id="${cid}" checked onchange="_sscToggleItem(this.checked,${presetId},'area',${ar.AreaID},0,${aid})"><label for="${cid}" class="ssc-cat-label">${escHtml(lbl)}</label>${sceneCtrl}<label style="color:var(--text-dim)">Fade</label><input type="number" class="action-param-input" min="0" max="3600" value="${a.fade??2}" onchange="_updateAssignParam(${aid},{fade:parseFloat(this.value)||0})"><span style="color:var(--text-dim)">s</span>${delayCtrl(aid,a.delay??0)}${dBtn(aid)}</div>`;
+                    } else {
+                        html += `<div class="ssc-cat-row"><input type="checkbox" id="${cid}" onchange="_sscToggleItem(this.checked,${presetId},'area',${ar.AreaID},0,null)"><label for="${cid}" class="ssc-cat-label">${escHtml(lbl)}</label></div>`;
+                    }
+                });
+                return html || '<div style="color:var(--text-dim);font-size:11px;padding:4px">データなし</div>';
+            }
+
+            // ── Shade Groups ──────────────────────────────────────────
+            if (cat === 'shades') {
+                (cd.shades || []).forEach(s => {
+                    const a = getAsn(133, s.ShadeGroupID);
+                    const cid = `ssc-sh-${s.ShadeGroupID}`;
+                    const lbl = s.AreaName ? `${s.AreaName} > ${s.ShadeName}` : s.ShadeName;
+                    if (a) {
+                        const aid = a.PresetAssignmentID;
+                        html += `<div class="ssc-cat-row"><input type="checkbox" id="${cid}" checked onchange="_sscToggleItem(this.checked,${presetId},'shade',${s.ShadeGroupID},0,${aid})"><label for="${cid}" class="ssc-cat-label">${escHtml(lbl)}</label><input type="number" class="action-param-input" min="0" max="100" value="${a.level??0}" style="width:42px" onchange="_updateAssignParam(${aid},{level:Math.min(100,Math.max(0,parseInt(this.value)||0))})"><span style="color:var(--text-dim)">%</span>${delayCtrl(aid,a.delay??0)}${dBtn(aid)}</div>`;
+                    } else {
+                        html += `<div class="ssc-cat-row"><input type="checkbox" id="${cid}" onchange="_sscToggleItem(this.checked,${presetId},'shade',${s.ShadeGroupID},0,null)"><label for="${cid}" class="ssc-cat-label">${escHtml(lbl)}</label></div>`;
+                    }
+                });
+                return html || '<div style="color:var(--text-dim);font-size:11px;padding:4px">データなし</div>';
+            }
+
+            // ── Sequences ─────────────────────────────────────────────
+            if (cat === 'sequences') {
+                (cd.sequences || []).forEach(s => {
+                    const a = getAsn(90, s.SequenceID);
+                    const cid = `ssc-sq-${s.SequenceID}`;
+                    if (a) {
+                        const aid = a.PresetAssignmentID;
+                        const cOpts = _SEQ_CMDS.map(c => `<option value="${c.v}"${a.AssignmentCommandType==c.v?' selected':''}>${c.label}</option>`).join('');
+                        html += `<div class="ssc-cat-row"><input type="checkbox" id="${cid}" checked onchange="_sscToggleItem(this.checked,${presetId},'sequence',${s.SequenceID},0,${aid})"><label for="${cid}" class="ssc-cat-label">${escHtml(s.SequenceName)}</label><select class="action-param-input" style="width:72px" onchange="_updateAssignParam(${aid},{cmd_type:parseInt(this.value)})">${cOpts}</select>${delayCtrl(aid,a.delay??0)}${dBtn(aid)}</div>`;
+                    } else {
+                        html += `<div class="ssc-cat-row"><input type="checkbox" id="${cid}" onchange="_sscToggleItem(this.checked,${presetId},'sequence',${s.SequenceID},0,null)"><label for="${cid}" class="ssc-cat-label">${escHtml(s.SequenceName)}</label></div>`;
+                    }
+                });
+                return html || '<div style="color:var(--text-dim);font-size:11px;padding:4px">データなし</div>';
+            }
+
+            // ── Variables ─────────────────────────────────────────────
+            if (cat === 'variables') {
+                const vars = variables || [];
+                vars.forEach(v => {
+                    const varAsns = assignments.filter(a => a.AssignableObjectType === 169 && a.AssignableObjectID === v.VariableID);
+                    html += `<div class="ssc-cat-group">${escHtml(v.Name)}</div>`;
+                    (v.states || []).forEach(st => {
+                        const a = varAsns.find(a2 => a2.state_id === st.VariableStateID);
+                        const cid = `ssc-v-${v.VariableID}-${st.VariableStateID}`;
+                        if (a) {
+                            const aid = a.PresetAssignmentID;
+                            html += `<div class="ssc-cat-row"><input type="checkbox" id="${cid}" checked onchange="_sscToggleVarState(this.checked,${presetId},${v.VariableID},${st.VariableStateID},${aid})"><label for="${cid}" class="ssc-cat-label">${escHtml(st.Name)}</label>${delayCtrl(aid,a.delay??0)}${dBtn(aid)}</div>`;
+                        } else {
+                            html += `<div class="ssc-cat-row"><input type="checkbox" id="${cid}" onchange="_sscToggleVarState(this.checked,${presetId},${v.VariableID},${st.VariableStateID},null)"><label for="${cid}" class="ssc-cat-label">${escHtml(st.Name)}</label></div>`;
+                        }
+                    });
+                });
+                return html || '<div style="color:var(--text-dim);font-size:11px;padding:4px">データなし</div>';
+            }
+
+            // ── HVAC ──────────────────────────────────────────────────
+            if (cat === 'hvac') {
+                (cd.hvac || []).forEach(z => {
+                    const a = getAsn(211, z.ZoneID);
+                    const lbl = z.ParentAreaName ? `${z.ParentAreaName} > ${z.ZoneName}` : z.ZoneName;
+                    const cid = `ssc-hv-${z.ZoneID}`;
+                    if (a) {
+                        const aid = a.PresetAssignmentID;
+                        html += `<div class="ssc-cat-row"><input type="checkbox" id="${cid}" checked onchange="_sscToggleItem(this.checked,${presetId},'hvac',${z.ZoneID},0,${aid})"><label for="${cid}" class="ssc-cat-label">${escHtml(lbl)}</label><span style="color:var(--text-dim);font-size:10px">Unaffected</span>${dBtn(aid)}</div>`;
+                    } else {
+                        html += `<div class="ssc-cat-row"><input type="checkbox" id="${cid}" onchange="_sscToggleItem(this.checked,${presetId},'hvac',${z.ZoneID},0,null)"><label for="${cid}" class="ssc-cat-label">${escHtml(lbl)}</label></div>`;
+                    }
+                });
+                return html || '<div style="color:var(--text-dim);font-size:11px;padding:4px">データなし</div>';
+            }
+
+            // ── Devices ───────────────────────────────────────────────
+            if (cat === 'devices') {
+                (cd.devices || []).forEach(d => {
+                    const a = getAsn(5, d.ControlStationDeviceID);
+                    const cid = `ssc-dv-${d.ControlStationDeviceID}`;
+                    if (a) {
+                        const aid = a.PresetAssignmentID;
+                        const lv = a.level ?? 1;
+                        html += `<div class="ssc-cat-row"><input type="checkbox" id="${cid}" checked onchange="_sscToggleItem(this.checked,${presetId},'device',${d.ControlStationDeviceID},0,${aid})"><label for="${cid}" class="ssc-cat-label">${escHtml(d.DeviceName)}</label><select class="action-param-input" style="width:70px" onchange="_updateAssignParam(${aid},{level:parseInt(this.value)})"><option value="1"${lv==1?' selected':''}>Lock</option><option value="2"${lv==2?' selected':''}>Unlock</option></select>${delayCtrl(aid,a.delay??0)}${dBtn(aid)}</div>`;
+                    } else {
+                        html += `<div class="ssc-cat-row"><input type="checkbox" id="${cid}" onchange="_sscToggleItem(this.checked,${presetId},'device',${d.ControlStationDeviceID},0,null)"><label for="${cid}" class="ssc-cat-label">${escHtml(d.DeviceName)}</label></div>`;
+                    }
+                });
+                return html || '<div style="color:var(--text-dim);font-size:11px;padding:4px">データなし</div>';
+            }
+
+            // ── Timeclocks ────────────────────────────────────────────
+            if (cat === 'timeclocks') {
+                const seen = new Set();
+                (cd.timeclocks || []).forEach(tc => {
+                    if (seen.has(tc.TimeClockID)) return;
+                    seen.add(tc.TimeClockID);
+                    const a = assignments.find(a => a.AssignableObjectType === 19 && a.AssignableObjectID === tc.TimeClockID);
+                    const cid = `ssc-tc-${tc.TimeClockID}`;
+                    if (a) {
+                        const aid = a.PresetAssignmentID;
+                        const ct = a.AssignmentCommandType;
+                        html += `<div class="ssc-cat-row"><input type="checkbox" id="${cid}" checked onchange="_sscToggleItem(this.checked,${presetId},'timeclock',${tc.TimeClockID},0,${aid})"><label for="${cid}" class="ssc-cat-label">${escHtml(tc.TimeclockName)}</label><select class="action-param-input" style="width:72px" onchange="_updateAssignParam(${aid},{cmd_type:parseInt(this.value)})"><option value="36"${ct===36?' selected':''}>Enable</option><option value="37"${ct===37?' selected':''}>Disable</option></select>${delayCtrl(aid,a.delay??0)}${dBtn(aid)}</div>`;
+                    } else {
+                        html += `<div class="ssc-cat-row"><input type="checkbox" id="${cid}" onchange="_sscToggleItem(this.checked,${presetId},'timeclock',${tc.TimeClockID},0,null)"><label for="${cid}" class="ssc-cat-label">${escHtml(tc.TimeclockName)}</label></div>`;
+                    }
+                });
+                return html || '<div style="color:var(--text-dim);font-size:11px;padding:4px">データなし</div>';
+            }
+
+            // ── Occupancy ─────────────────────────────────────────────
+            if (cat === 'occupancy') {
+                (cd.occupancy || []).forEach(o => {
+                    const a = getAsn(38, o.OccupancyGroupID);
+                    const cid = `ssc-oc-${o.OccupancyGroupID}`;
+                    if (a) {
+                        const aid = a.PresetAssignmentID;
+                        const sv = a.level ?? 1;
+                        html += `<div class="ssc-cat-row"><input type="checkbox" id="${cid}" checked onchange="_sscToggleItem(this.checked,${presetId},'occupancy',${o.OccupancyGroupID},0,${aid})"><label for="${cid}" class="ssc-cat-label">${escHtml(o.OGName)}</label><select class="action-param-input" style="width:90px" onchange="_updateAssignParam(${aid},{level:parseInt(this.value)})"><option value="1"${sv===1?' selected':''}>Occupied</option><option value="2"${sv===2?' selected':''}>Unoccupied</option><option value="4"${sv===4?' selected':''}>Bypass</option></select>${delayCtrl(aid,a.delay??0)}${dBtn(aid)}</div>`;
+                    } else {
+                        html += `<div class="ssc-cat-row"><input type="checkbox" id="${cid}" onchange="_sscToggleItem(this.checked,${presetId},'occupancy',${o.OccupancyGroupID},0,null)"><label for="${cid}" class="ssc-cat-label">${escHtml(o.OGName)}</label></div>`;
+                    }
+                });
+                return html || '<div style="color:var(--text-dim);font-size:11px;padding:4px">データなし</div>';
+            }
+
+            // ── Room Properties ───────────────────────────────────────
+            if (cat === 'roomprop') {
+                (cd.rooms || []).forEach(r => {
+                    const a = getAsn(400, r.RentableSpaceID);
+                    const cid = `ssc-rp-${r.RentableSpaceID}`;
+                    if (a) {
+                        const aid = a.PresetAssignmentID;
+                        const UNAFFECTED = 65280;
+                        const props = a.props || {};
+                        const summary = [[149,'Presence'],[150,'Emergency'],[151,'DND'],[152,'RoomState'],[153,'MUR']]
+                            .map(([pid,nm]) => { const v=props[pid]; return (v===undefined||v===UNAFFECTED)?null:`${nm}:${v===1?'On':'Off'}`; })
+                            .filter(Boolean).join(' ') || 'All Unaffected';
+                        html += `<div class="ssc-cat-row"><input type="checkbox" id="${cid}" checked onchange="_sscToggleItem(this.checked,${presetId},'roomprop',${r.RentableSpaceID},0,${aid})"><label for="${cid}" class="ssc-cat-label">${escHtml(r.RoomName)}</label><span style="color:var(--text-dim);font-size:10px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${summary}</span><button class="prog-add-btn" style="padding:1px 6px;font-size:10px" onclick="_editRoomProps(${aid},'ssc-${presetId}',0,${presetId})">編集</button>${delayCtrl(aid,a.delay??0)}${dBtn(aid)}</div>`;
+                    } else {
+                        html += `<div class="ssc-cat-row"><input type="checkbox" id="${cid}" onchange="_sscToggleItem(this.checked,${presetId},'roomprop',${r.RentableSpaceID},0,null)"><label for="${cid}" class="ssc-cat-label">${escHtml(r.RoomName)}</label></div>`;
+                    }
+                });
+                return html || '<div style="color:var(--text-dim);font-size:11px;padding:4px">データなし</div>';
+            }
+
+            return '<div style="color:var(--text-dim);font-size:11px;padding:4px">未実装</div>';
+        }
+
+        function _renderSharedSceneAssignments(presetId, assignments, variables, cd) {
+            const body = document.getElementById('ssc-detail-body');
+            if (!body) return;
+            const displayName = _sscCurrentName || '';
+            let html = `<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
+  <span id="ssc-detail-name" style="font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1">${escHtml(displayName)}</span>
+  <button class="ssc-edit-btn" title="名前を編集" onclick="_sscEditName()">✏</button>
+</div>`;
+            const CATS = [
+                ['zones','Lighting - Zones'],['areas','Lighting - Areas'],
+                ['cco','Contact Closure Outputs'],['shades','Shade Groups'],
+                ['sequences','Sequences'],['variables','Variables'],
+                ['hvac','HVAC Zones'],['devices','Devices'],
+                ['timeclocks','Timeclocks'],['occupancy','Occupancy Settings'],
+                ['roomprop','Room Properties'],
+            ];
+            const catOpts = CATS.map(([v,l]) => `<option value="${v}"${_sscCategory===v?' selected':''}>${l}</option>`).join('');
+            html += `<div style="margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid var(--border)">
+  <select style="font-size:11px;padding:2px 4px" onchange="_sscSetCategory(this.value,${presetId})">${catOpts}</select>
+</div>`;
+            html += _sscCategoryHtml(presetId, assignments, variables, cd);
+            body.innerHTML = html;
+        }
+
+
+
+
+        async function _sscRemoveAssignment(assignmentId, presetId) {
+            const res = await fetch(`/api/assignment/${assignmentId}`, { method: 'DELETE' });
+            if (!res.ok) { const d = await res.json(); toast(d.error || 'エラー', 'red'); return; }
+            markDirty();
+            _loadSharedSceneDetail(presetId);
+        }
+
+        function _sscEditName() {
+            if (!_sscCurrentPresetId) return;
+            const nameEl = document.getElementById('ssc-detail-name');
+            if (!nameEl) return;
+            const currentName = _sscCurrentName;
+            const inp = document.createElement('input');
+            inp.type = 'text';
+            inp.value = currentName;
+            inp.className = 'ssc-name-input';
+            const save = async () => {
+                const newName = inp.value.trim();
+                if (!newName || newName === currentName) { nameEl.style.display = ''; inp.remove(); return; }
+                await fetch(`/api/preset/${_sscCurrentPresetId}/name`, {
+                    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name: newName })
+                });
+                _sscCurrentName = newName;
+                nameEl.textContent = newName;
+                // Update list item
+                const li = document.getElementById(`sscli-${_sscCurrentPresetId}`);
+                if (li) li.textContent = newName;
+                const p = _sscPresets.find(x => x.PresetID === _sscCurrentPresetId);
+                if (p) p.Name = newName;
+                markDirty();
+                toast('名前を更新しました');
+                nameEl.style.display = '';
+                inp.remove();
+            };
+            inp.addEventListener('blur', save);
+            inp.addEventListener('keydown', e => { if (e.key === 'Enter') inp.blur(); if (e.key === 'Escape') { inp.value = currentName; inp.blur(); } });
+            nameEl.style.display = 'none';
+            nameEl.parentNode.insertBefore(inp, nameEl);
+            inp.focus(); inp.select();
         }
 
         // ── Keypads ───────────────────────────────────
@@ -3734,7 +4253,17 @@
             const lv = (level == null ? 100 : level);
             const fa = (fade == null ? 0 : fade);
             if (ctrl === 8) {
-                return `<span style="color:var(--text-dim);font-size:10px">パルス</span>`;
+                const PULSE_OPTS = [0, 0.25, 0.5, 0.75, 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 10, 20];
+                const opts = PULSE_OPTS.map(v => {
+                    const sel = (Math.abs(fa - v) < 0.01) ? ' selected' : '';
+                    const lbl = v === 0 ? 'Unaffected' : v.toFixed(2) + 's';
+                    return `<option value="${v}"${sel}>${lbl}</option>`;
+                }).join('');
+                return `<label style="color:var(--text-dim)">Settings</label>
+    <select class="action-param-input" style="width:96px"
+      onchange="_updateAssignParam(${aid},{fade:parseFloat(this.value)})">
+      ${opts}
+    </select>`;
             }
             if (ctrl === 7) {
                 const sel = lv >= 50 ? 'selected' : '';
@@ -4047,7 +4576,7 @@
                 },
                 {
                     label: 'Lighting - Areas',
-                    items: (cd.areas || []).filter(a => !asnAreas.has(a.AreaID)).map(a => ({
+                    items: (cd.areas || []).filter(a => uid.startsWith('ssc-') || !asnAreas.has(a.AreaID)).map(a => ({
                         label: _areaLabel(a.AreaName, a.ParentAreaName),
                         type: 'area', data: { id: a.AreaID, name: a.AreaName || a.ParentAreaName },
                     })),
@@ -4201,7 +4730,12 @@
             if (type === 'zone' || type === 'cco') {
                 const ctrl = itemData.ctrl || 1;
                 if (ctrl === 8) {
-                    paramsHtml = `<span style="grid-column:1/-1;color:var(--text-dim);font-size:11px">CCO Pulsed — パラメータなし</span>`;
+                    const PULSE_OPTS = [0, 0.25, 0.5, 0.75, 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 10, 20];
+                    const pOpts = PULSE_OPTS.map(v => {
+                        const lbl = v === 0 ? 'Unaffected' : v.toFixed(2) + 's';
+                        return `<option value="${v}">${lbl}</option>`;
+                    }).join('');
+                    paramsHtml = `<label>Settings</label><select id="ap-fade">${pOpts}</select>`;
                 } else if (ctrl === 7) {
                     paramsHtml = `
         <label>状態</label>
@@ -4219,10 +4753,17 @@
                 paramsHtml += `<label>Delay (s)</label><input id="ap-delay" type="number" min="0" max="3600" value="0">`;
 
             } else if (type === 'area') {
-                paramsHtml = `
+                if (uid.startsWith('ssc-')) {
+                    // Shared Scene: scene is implicit from preset SortOrder, only fade/delay needed
+                    paramsHtml = `
+      <label>Fade (s)</label><input id="ap-fade" type="number" min="0" max="3600" value="2">
+      <label>Delay (s)</label><input id="ap-delay" type="number" min="0" max="3600" value="0">`;
+                } else {
+                    paramsHtml = `
       <label>Level (%)</label><input id="ap-level" type="number" min="0" max="100" value="100">
       <label>Fade (s)</label><input id="ap-fade" type="number" min="0" max="3600" value="0">
       <label>Delay (s)</label><input id="ap-delay" type="number" min="0" max="3600" value="0">`;
+                }
 
             } else if (type === 'shade') {
                 paramsHtml = `
@@ -4323,8 +4864,8 @@
             const stateEl = document.getElementById('ap-state');
 
             const level = lvlEl ? parseInt(lvlEl.value) : 100;
-            const fade = fadeEl ? parseInt(fadeEl.value) : 0;
-            const delay = delayEl ? parseInt(delayEl.value) : 0;
+            const fade = fadeEl ? parseFloat(fadeEl.value) : 0;
+            const delay = delayEl ? parseFloat(delayEl.value) : 0;
 
             let body = { item_type: type, item_id: itemData.id, delay };
             if (type === 'sequence') {
@@ -4344,7 +4885,9 @@
                     body.props[String(pid)] = el ? parseInt(el.value) : UNAFFECTED;
                 });
             } else if (type !== 'hvac' && type !== 'integration') {
-                body.level = level;
+                const ctrl = (itemData && itemData.ctrl) || 0;
+                const isSsc = uid.startsWith('ssc-');
+                if (ctrl !== 8) body.level = level;   // CCO Pulsed has no level
                 if (fadeEl) body.fade = fade;
             }
 
@@ -4367,7 +4910,11 @@
             const data = await res.json();
             if (!res.ok) { toast(data.error || 'エラー', 'red'); return; }
             markDirty();
-            _loadActionAssignments(uid, pmId, presetId);
+            if (uid.startsWith('ssc-')) {
+                _loadSharedSceneDetail(presetId);
+            } else {
+                _loadActionAssignments(uid, pmId, presetId);
+            }
         }
 
         function _editRoomProps(aid, uid, pmId, presetId) {
@@ -4449,6 +4996,10 @@
         }
 
         // ── Toast ────────────────────────────────────
+        function escHtml(s) {
+            return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+        }
+
         function toast(msg, type = '') {
             const el = document.getElementById('toast');
             el.textContent = msg;
