@@ -1630,6 +1630,7 @@
       </div>
     </div>
   `;
+            if (tab === 'shared-scenes') loadSharedScenes(areaId);
         }
 
         function switchDetailTab(tabName, areaId, areaName) {
@@ -2014,13 +2015,40 @@
 
             // ── HVAC ──────────────────────────────────────────────────
             if (cat === 'hvac') {
+                const SCHED_LBL = {0:'Unaffected',1:'Run',2:'Hold'};
+                const MODE_LBL  = {0:'Unaffected',1:'Heat',2:'Cool',3:'Auto',4:'Off'};
+                const FAN_LBL   = {0:'Unaffected',1:'Auto',2:'High',3:'Medium',4:'Low'};
+                function hvacCtrl(aid, hp) {
+                    const s = n => `<span style="display:inline-block;width:72px;color:var(--text-dim);font-size:11px;flex-shrink:0">${n}</span>`;
+                    const row = (lbl, ctrl) => `<div style="display:flex;align-items:center;gap:6px;margin-top:3px;margin-left:24px">${s(lbl)}${ctrl}</div>`;
+                    const sel = (opts, key) => `<select class="action-param-input" style="width:110px" onchange="_updateAssignParam(${aid},{hvac:{${key}:parseInt(this.value)}})">${opts}</select>`;
+                    // PT=44=schedule (255→norm 0=Unaff, 1=Run, 2=Hold confirmed)
+                    // PT=47=mode, PT=48=fan (both: 255→norm 0=Unaff)
+                    const schedOpts = Object.entries(SCHED_LBL).map(([v,l])=>`<option value="${v}"${Number(v)===hp.schedule?' selected':''}>${l}</option>`).join('');
+                    const modeOpts  = Object.entries(MODE_LBL).map(([v,l])=>`<option value="${v}"${Number(v)===hp.mode?' selected':''}>${l}</option>`).join('');
+                    const fanOpts   = Object.entries(FAN_LBL).map(([v,l])=>`<option value="${v}"${Number(v)===hp.fan?' selected':''}>${l}</option>`).join('');
+                    // PT=54=setpoint tenths °F (720=Unaff); PT=53=temp active flag (auto-managed)
+                    const tempC = (hp.setpoint == null || hp.setpoint === 720) ? '' : Math.round((hp.setpoint - 320) / 18);
+                    // PT=55=below-setpoint drift (neg), PT=56=above-setpoint drift (pos); tenths °F
+                    // PT=57=drift_on flag; 18 tenths °F = 1°C
+                    const driftOn = hp.drift_on === 1;
+                    const heatVal = !driftOn ? '' : (hp.heat_drift / 18).toFixed(1);
+                    const coolVal = !driftOn ? '' : (hp.cool_drift / 18).toFixed(1);
+                    return row('Sched', sel(schedOpts, 'schedule')) +
+                        row('Mode',  sel(modeOpts,  'mode')) +
+                        row('Fan',   sel(fanOpts,   'fan')) +
+                        row('Temp',  `<input type="number" step="1" class="action-param-input" style="width:70px" placeholder="Unaff" value="${tempC}" onchange="_updateAssignParam(${aid},{hvac:{setpoint:this.value===''?720:Math.round(parseFloat(this.value)*18+320)}})"><span style="color:var(--text-dim);font-size:11px">°C</span>`) +
+                        row('Heat Drift', `<input type="number" step="0.1" class="action-param-input" style="width:70px" placeholder="Unaff" value="${heatVal}" onchange="_updateAssignParam(${aid},{hvac:{heat_drift:this.value===''?0:Math.round(parseFloat(this.value)*18),drift_on:this.value===''?0:1}})"><span style="color:var(--text-dim);font-size:11px">°C</span>`) +
+                        row('Cool Drift', `<input type="number" step="0.1" class="action-param-input" style="width:70px" placeholder="Unaff" value="${coolVal}" onchange="_updateAssignParam(${aid},{hvac:{cool_drift:this.value===''?0:Math.round(parseFloat(this.value)*18),drift_on:this.value===''?0:1}})"><span style="color:var(--text-dim);font-size:11px">°C</span>`);
+                }
                 (cd.hvac || []).forEach(z => {
                     const a = getAsn(211, z.ZoneID);
                     const lbl = z.ParentAreaName ? `${z.ParentAreaName} > ${z.ZoneName}` : z.ZoneName;
                     const cid = `ssc-hv-${z.ZoneID}`;
                     if (a) {
                         const aid = a.PresetAssignmentID;
-                        html += `<div class="ssc-cat-row"><input type="checkbox" id="${cid}" checked onchange="_sscToggleItem(this.checked,${presetId},'hvac',${z.ZoneID},0,${aid})"><label for="${cid}" class="ssc-cat-label">${escHtml(lbl)}</label><span style="color:var(--text-dim);font-size:10px">Unaffected</span>${dBtn(aid)}</div>`;
+                        const hp = a.hvac || {setpoint:720,schedule:0,mode:0,fan:0,heat_drift:0,cool_drift:0,drift_on:0};
+                        html += `<div class="ssc-cat-row" style="flex-wrap:wrap"><input type="checkbox" id="${cid}" checked onchange="_sscToggleItem(this.checked,${presetId},'hvac',${z.ZoneID},0,${aid})"><label for="${cid}" class="ssc-cat-label">${escHtml(lbl)}</label>${hvacCtrl(aid,hp)}${dBtn(aid)}</div>`;
                     } else {
                         html += `<div class="ssc-cat-row"><input type="checkbox" id="${cid}" onchange="_sscToggleItem(this.checked,${presetId},'hvac',${z.ZoneID},0,null)"><label for="${cid}" class="ssc-cat-label">${escHtml(lbl)}</label></div>`;
                     }

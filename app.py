@@ -2247,6 +2247,33 @@ def cond_debug():
               AND pa.AssignableObjectType = 2
             ORDER BY p.SortOrder, pa.PresetAssignmentID, acp.ParameterType
         """),
+        "shared_scene_zone_assignments": q("""
+            SELECT TOP 30
+                   p.PresetID, p.Name AS PresetName,
+                   pa.PresetAssignmentID, pa.AssignableObjectType, pa.AssignableObjectID,
+                   pa.AssignmentCommandType, pa.AssignmentCommandGroup,
+                   COALESCE(z15.Name, z198.Name) AS ZoneName,
+                   acp.ParameterType, acp.ParameterValue
+            FROM tblPreset p
+            JOIN tblPresetAssignment pa ON pa.ParentID = p.PresetID
+            LEFT JOIN tblZone z15  ON z15.ZoneID  = pa.AssignableObjectID AND pa.AssignableObjectType = 15
+            LEFT JOIN tblZone z198 ON z198.ZoneID = pa.AssignableObjectID AND pa.AssignableObjectType = 198
+            LEFT JOIN tblAssignmentCommandParameter acp ON acp.ParentId = pa.PresetAssignmentID
+            WHERE p.PresetType = 3 AND p.ParentType = 2
+              AND pa.AssignableObjectType IN (15, 198, 211)
+            ORDER BY p.SortOrder, pa.PresetAssignmentID, acp.ParameterType
+        """),
+        "hvac_all_preset_params": q("""
+            SELECT p.PresetID, p.Name AS PresetName, p.SortOrder,
+                   pa.PresetAssignmentID, pa.AssignableObjectID,
+                   acp.ParameterType, acp.ParameterValue
+            FROM tblPreset p
+            JOIN tblPresetAssignment pa ON pa.ParentID = p.PresetID
+                 AND pa.AssignableObjectType = 211
+            LEFT JOIN tblAssignmentCommandParameter acp ON acp.ParentId = pa.PresetAssignmentID
+            WHERE p.PresetType = 3 AND p.ParentType = 2
+            ORDER BY p.SortOrder, pa.PresetAssignmentID, acp.ParameterType
+        """),
         "area_scenes_sample": q("""
             SELECT TOP 20 sc.ParentID AS AreaID, a.Name AS AreaName,
                    s.SceneID, s.Name AS SceneName, s.Number, s.SortOrder
@@ -2692,6 +2719,29 @@ def list_preset_assignments(preset_id):
                 153: pm.get(80, UNAFFECTED),
             }
             a["level"] = None
+        elif ot == 211:
+            # HVAC programming params (confirmed from DB analysis):
+            # PT=44: schedule override (255=Unaffected→0, 1=Run, 2=Hold confirmed from DB)
+            # PT=47: op mode (255=Unaffected, 1=Heat, 2=Cool, 3=Auto, 4=Off)
+            # PT=48: fan speed (255=Unaffected, 0=Unaffected(alt), 1=Auto, 2=High, 3=Med, 4=Low)
+            # PT=53: "temp setpoint active" flag (NOT Schedule) — 1 when PT=54 is set, auto-managed
+            # PT=54: setpoint in tenths of °F (720=Unaffected; 662=19°C, 716=22°C)
+            # PT=55: below-setpoint (heat) drift in tenths of °F (0=none, -18=-1°C, -36=-2°C)
+            # PT=56: above-setpoint (cool) drift in tenths of °F (0=none, 18=+1°C, 36=+2°C)
+            # PT=57: drift enable flag (0=drift not applied, 1=drift applied)
+            mode_raw  = pm.get(47, 255)
+            fan_raw   = pm.get(48, 255)
+            sched_raw = pm.get(44, 255)
+            a["hvac"] = {
+                "setpoint":   pm.get(54, 720),
+                "schedule":   0 if sched_raw == 255 else sched_raw,  # normalize 255→0
+                "mode":       0 if mode_raw  == 255 else mode_raw,   # normalize 255→0
+                "fan":        0 if fan_raw   == 255 else fan_raw,    # normalize 255→0
+                "heat_drift": pm.get(55, 0),   # tenths of °F, negative (÷18 = °C)
+                "cool_drift": pm.get(56, 0),   # tenths of °F, positive (÷18 = °C)
+                "drift_on":   pm.get(57, 0),   # 1 when drift settings are active
+            }
+            a["level"] = None
         elif ot == 133:
             a["level"] = pm.get(7, 0)           # Shade position 0–100
         elif ot == 5:
@@ -2977,6 +3027,25 @@ def update_assignment(assignment_id):
                 mapping[7]  = int(data["level"])       # Shade position: ParamType 7
             elif ot == 5:
                 mapping[22] = int(data["level"])       # Device lock: ParamType 22
+
+    # HVAC params dict (ObjType=211)
+    if "hvac" in data and isinstance(data["hvac"], dict):
+        HVAC_PT = {"heat_drift": 55, "cool_drift": 56, "drift_on": 57}
+        for key, pt in HVAC_PT.items():
+            if key in data["hvac"]:
+                mapping[pt] = int(data["hvac"][key])
+        # setpoint: also auto-set PT=53 ("temp active" flag)
+        if "setpoint" in data["hvac"]:
+            sp = int(data["hvac"]["setpoint"])
+            mapping[54] = sp
+            mapping[53] = 0 if sp == 720 else 1
+        # schedule/mode/fan: UI sends 0 for Unaffected; LD stores 255 for Unaffected
+        if "schedule" in data["hvac"]:
+            mapping[44] = 255 if int(data["hvac"]["schedule"]) == 0 else int(data["hvac"]["schedule"])
+        if "mode" in data["hvac"]:
+            mapping[47] = 255 if int(data["hvac"]["mode"]) == 0 else int(data["hvac"]["mode"])
+        if "fan" in data["hvac"]:
+            mapping[48] = 255 if int(data["hvac"]["fan"]) == 0 else int(data["hvac"]["fan"])
 
     # Room property props dict (ObjType=400)
     if "props" in data and isinstance(data["props"], dict):
