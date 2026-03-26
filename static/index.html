@@ -4273,18 +4273,38 @@
                     btn.textContent = '💾 保存';
                     return;
                 }
-                // Trigger file download from binary response
                 const blob = await res.blob();
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url;
                 const disp = res.headers.get('Content-Disposition') || '';
                 const m = disp.match(/filename[^=]*=["']?([^"';\n]+)/);
-                a.download = m ? m[1] : 'project.pl';
-                document.body.appendChild(a);
-                a.click();
-                document.body.removeChild(a);
-                URL.revokeObjectURL(url);
+                const filename = m ? m[1] : 'project.pl';
+
+                if ('showSaveFilePicker' in window) {
+                    // File System Access API: lets user choose save location (can overwrite original)
+                    let handle;
+                    try {
+                        handle = await window.showSaveFilePicker({
+                            suggestedName: filename,
+                            types: [{ description: 'Lutron Project File', accept: { 'application/octet-stream': ['.pl'] } }]
+                        });
+                    } catch(e) {
+                        if (e.name === 'AbortError') { btn.disabled = false; btn.textContent = '💾 保存'; return; }
+                        throw e;
+                    }
+                    const writable = await handle.createWritable();
+                    await writable.write(blob);
+                    await writable.close();
+                } else {
+                    // Fallback: force browser download
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = filename;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                }
+
                 btn.textContent = '💾 保存';
                 isDirty = false;
                 const db = document.getElementById('dirty-badge');
