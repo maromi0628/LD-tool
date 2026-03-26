@@ -1056,8 +1056,27 @@
         /* ── Shared Scenes tab (LD-like 2-pane layout) ── */
         .ssc-layout {
             display: flex;
-            height: 100%;
-            min-height: 300px;
+            flex: 1;
+            min-height: 0;
+        }
+
+        /* When Shared Scenes tab is active, stop #detail from scrolling so
+           the two panels inside .ssc-layout scroll independently */
+        #detail.ssc-active {
+            overflow-y: hidden;
+        }
+        #detail.ssc-active .card {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden !important;
+            min-height: 0;
+        }
+        #detail.ssc-active #tab-shared-scenes.active {
+            display: flex;
+            flex: 1;
+            overflow: hidden;
+            min-height: 0;
         }
 
         .ssc-list {
@@ -1630,6 +1649,7 @@
       </div>
     </div>
   `;
+            detail.classList.toggle('ssc-active', tab === 'shared-scenes');
             if (tab === 'shared-scenes') loadSharedScenes(areaId);
         }
 
@@ -1642,6 +1662,7 @@
             const idx = tabOrder.indexOf(tabName);
             if (tabs[idx]) tabs[idx].classList.add('active');
             document.getElementById('tab-' + tabName).classList.add('active');
+            document.getElementById('detail').classList.toggle('ssc-active', tabName === 'shared-scenes');
             if (tabName === 'shared-scenes') loadSharedScenes(areaId);
         }
 
@@ -1764,13 +1785,15 @@
             try {
                 const res = await fetch(`/api/area/${areaId}/shared-presets`);
                 _sscPresets = await res.json();
-                if (!_sscPresets.length) {
-                    panel.innerHTML = '<div class="loading" style="padding:16px">Shared Scenesなし</div>';
-                    return;
-                }
                 panel.innerHTML = `
 <div class="ssc-layout">
-  <div class="ssc-list" id="ssc-list"></div>
+  <div style="display:flex;flex-direction:column;width:220px;min-width:160px;flex-shrink:0;border-right:1px solid var(--border)">
+    <div style="padding:6px 8px;border-bottom:1px solid var(--border);flex-shrink:0">
+      <button class="btn btn-primary" style="width:100%;font-size:11px;padding:3px 0" onclick="_sscAddPreset()"
+        ${_sscPresets.length >= 100 ? 'disabled title="上限100個"' : ''}>＋ Shared Scene 追加</button>
+    </div>
+    <div class="ssc-list" id="ssc-list" style="width:auto;border-right:none;flex:1"></div>
+  </div>
   <div class="ssc-detail-pane">
     <div id="ssc-detail-body" class="ssc-detail-body">
       <div style="color:var(--text-dim);font-size:11px;padding:8px">シーンを選択してください</div>
@@ -1778,10 +1801,26 @@
   </div>
 </div>`;
                 _renderSscList();
-                selectSharedScene(_sscPresets[0].PresetID, _sscPresets[0].Name);
+                if (_sscPresets.length) selectSharedScene(_sscPresets[0].PresetID, _sscPresets[0].Name);
             } catch (e) {
                 panel.innerHTML = '<div class="loading" style="padding:16px;color:var(--red)">読み込みエラー</div>';
             }
+        }
+
+        async function _sscAddPreset() {
+            const name = prompt('新しいShared Scene名を入力してください:');
+            if (!name || !name.trim()) return;
+            const res = await fetch(`/api/area/${_sscAreaId}/shared-presets`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name: name.trim() })
+            });
+            const d = await res.json();
+            if (!res.ok) { toast(d.error || '追加失敗', 'red'); return; }
+            markDirty();
+            toast(`"${d.name}" を追加しました`);
+            await loadSharedScenes(_sscAreaId);
+            selectSharedScene(d.preset_id, d.name);
         }
 
         function _renderSscList() {

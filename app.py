@@ -719,6 +719,43 @@ def area_shared_presets(area_id):
     return jsonify(rows)
 
 
+@app.route("/api/area/<int:area_id>/shared-presets", methods=["POST"])
+def create_shared_preset(area_id):
+    """Create a new shared preset (PresetType=3) for the given area. Max 100 per area."""
+    if not state["db_name"]:
+        return jsonify({"error": "DB未接続"}), 400
+    data = request.json or {}
+    name = data.get("name", "").strip()
+    if not name:
+        return jsonify({"error": "名前が空です"}), 400
+
+    # Check 100-preset limit
+    count_rows = q("""
+        SELECT COUNT(*) AS cnt FROM tblPreset
+        WHERE PresetType = 3 AND ParentType = 2 AND ParentID = ?
+    """, (area_id,))
+    count = count_rows[0]["cnt"] if count_rows else 0
+    if count >= 100:
+        return jsonify({"error": f"このエリアのShared Sceneは上限100個です（現在{count}個）"}), 400
+
+    # Determine next SortOrder
+    so_rows = q("""
+        SELECT ISNULL(MAX(SortOrder), -1) + 1 AS next_so FROM tblPreset
+        WHERE PresetType = 3 AND ParentType = 2 AND ParentID = ?
+    """, (area_id,))
+    next_so = so_rows[0]["next_so"] if so_rows else 0
+
+    preset_id = _alloc_and_insert("tblPreset", "PresetID", {
+        "Name": name,
+        "PresetType": 3,
+        "ParentType": 2,
+        "ParentID": area_id,
+        "SortOrder": next_so,
+        "NeedsTransfer": 1,
+    })
+    return jsonify({"preset_id": preset_id, "name": name, "sort_order": next_so}), 201
+
+
 # ── Load type master ──────────────────────────
 
 @app.route("/api/load-types")
