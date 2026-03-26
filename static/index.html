@@ -4264,14 +4264,37 @@
             const btn = document.getElementById('save-btn');
             btn.disabled = true;
             btn.textContent = '保存中...';
-            const res = await fetch('/api/save', { method: 'POST' });
-            const d = await res.json();
-            btn.textContent = '💾 保存';
-            if (!res.ok) { toast(d.error || '保存失敗', 'red'); btn.disabled = false; return; }
-            isDirty = false;
-            const db = document.getElementById('dirty-badge');
-            if (db) db.remove();
-            toast('保存しました ✓');
+            try {
+                const res = await fetch('/api/save', { method: 'POST' });
+                if (!res.ok) {
+                    const d = await res.json().catch(() => ({}));
+                    toast(d.error || '保存失敗', 'red');
+                    btn.disabled = false;
+                    btn.textContent = '💾 保存';
+                    return;
+                }
+                // Trigger file download from binary response
+                const blob = await res.blob();
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                const disp = res.headers.get('Content-Disposition') || '';
+                const m = disp.match(/filename[^=]*=["']?([^"';\n]+)/);
+                a.download = m ? m[1] : 'project.pl';
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+                btn.textContent = '💾 保存';
+                isDirty = false;
+                const db = document.getElementById('dirty-badge');
+                if (db) db.remove();
+                toast('保存しました ✓');
+            } catch(e) {
+                toast('保存失敗: ' + e.message, 'red');
+                btn.disabled = false;
+                btn.textContent = '💾 保存';
+            }
         }
 
         // ── Actions tab ──────────────────────────────
