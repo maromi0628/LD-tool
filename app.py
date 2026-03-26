@@ -714,7 +714,7 @@ def area_shared_presets(area_id):
         SELECT p.PresetID, p.Name, p.SortOrder
         FROM tblPreset p
         WHERE p.PresetType = 3 AND p.ParentType = 2 AND p.ParentID = ?
-        ORDER BY p.SortOrder, p.Name
+        ORDER BY p.Name
     """, (area_id,))
     return jsonify(rows)
 
