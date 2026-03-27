@@ -36,6 +36,8 @@ state = {
     "dirty":         False,  # unsaved changes exist
     "template_id":   None,   # active template ID (filename in Templates/)
     "tmpl_zip_name": None,   # same as template_id (kept for clarity in save)
+    "undo_stack":    [],     # [{label, sqls, redo_sqls}, ...]  max 50
+    "redo_stack":    [],
 }
 
 def _detect_sql_instance():
@@ -263,6 +265,16 @@ def execute_sqls(statements):
     state["dirty"] = True
 
 
+def push_undo(undo_sqls, redo_sqls, label=""):
+    """Push a reversible operation onto the undo stack.
+    undo_sqls / redo_sqls: list of (sql_string, params_tuple) pairs.
+    Clears the redo stack on new push."""
+    state["undo_stack"].append({"label": label, "sqls": undo_sqls, "redo_sqls": redo_sqls})
+    state["redo_stack"].clear()
+    if len(state["undo_stack"]) > 50:
+        state["undo_stack"].pop(0)
+
+
 # LoadType → ControlType mapping
 _CCO_MAINTAINED = {25, 37}
 _CCO_PULSED     = {26}
@@ -414,6 +426,8 @@ def load_project(work_dir, template_id=None):
     state["template_id"] = None
     state["tmpl_zip_name"] = None
     state["dirty"] = False
+    state["undo_stack"] = []
+    state["redo_stack"] = []
 
     lut, tmpl_zip_name = find_lut_for_template(work_dir, template_id)
     if lut and PYODBC_OK:
@@ -1051,6 +1065,51 @@ def create_shared_preset(area_id):
     return jsonify({"preset_id": preset_id, "name": name, "sort_order": next_so}), 201
 
 
+@app.route("/api/preset/<int:preset_id>/copy", methods=["POST"])
+def copy_preset(preset_id):
+    """Copy a shared preset and all its zone assignments."""
+    if not state["db_name"]:
+        return jsonify({"error": "DB未接続"}), 400
+    src = q("SELECT * FROM tblPreset WHERE PresetID=? AND PresetType=3", (preset_id,))
+    if not src:
+        return jsonify({"error": "プリセットが見つかりません"}), 404
+    s = src[0]
+
+    so_rows = q("SELECT ISNULL(MAX(SortOrder),-1)+1 AS ns FROM tblPreset WHERE PresetType=3 AND ParentType=2 AND ParentID=?",
+                (s["ParentID"],))
+    next_so = so_rows[0]["ns"] if so_rows else 0
+
+    new_pid = _alloc_and_insert("tblPreset", "PresetID", {
+        "Name": s["Name"] + " のコピー",
+        "PresetType": 3, "ParentType": 2, "ParentID": s["ParentID"],
+        "SortOrder": next_so, "NeedsTransfer": 1, "DatabaseRevision": 0,
+        "WhereUsedId": 2147483647, "IsGPDPreset": 0,
+    })
+
+    assignments = q("SELECT * FROM tblPresetAssignment WHERE ParentID=?", (preset_id,))
+    for assn in assignments:
+        new_aid = _alloc_and_insert("tblPresetAssignment", "PresetAssignmentID", {
+            "Name": assn.get("Name", ""),
+            "DatabaseRevision": 0,
+            "SortOrder": assn.get("SortOrder", 0),
+            "ParentID": new_pid,
+            "ParentType": assn.get("ParentType", 43),
+            "AssignableObjectID": assn.get("AssignableObjectID"),
+            "AssignableObjectType": assn.get("AssignableObjectType"),
+            "AssignmentCommandType": assn.get("AssignmentCommandType", 2),
+            "NeedsTransfer": 1,
+            "AssignmentCommandGroup": assn.get("AssignmentCommandGroup", 1),
+            "WhereUsedId": 2147483647,
+        })
+        params = q("SELECT ParameterType, ParameterValue FROM tblAssignmentCommandParameter WHERE ParentId=?",
+                   (assn["PresetAssignmentID"],))
+        for p in params:
+            execute_sql("INSERT INTO tblAssignmentCommandParameter (SortOrder,ParentId,ParameterType,ParameterValue) VALUES (0,?,?,?)",
+                        (new_aid, p["ParameterType"], p["ParameterValue"]))
+
+    return jsonify({"preset_id": new_pid, "name": s["Name"] + " のコピー"}), 201
+
+
 # ── Area Scenes ────────────────────────────────────────────────────────────────
 
 @app.route("/api/area/<int:area_id>/scenes-full")
@@ -1283,6 +1342,87 @@ def create_area_scene(area_id):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/scene/<int:scene_id>/copy", methods=["POST"])
+def copy_area_scene(scene_id):
+    """Copy an area scene with all its zone assignments."""
+    if not state["db_name"]:
+        return jsonify({"error": "DB未接続"}), 400
+    try:
+        src = q("SELECT * FROM tblScene WHERE SceneID=?", (scene_id,))
+        if not src:
+            return jsonify({"error": "シーンが見つかりません"}), 404
+        s = src[0]
+        ctrl_id = s["ParentSceneControllerID"]
+
+        # Check 16-scene limit
+        cnt = q("SELECT COUNT(*) AS c FROM tblScene WHERE ParentSceneControllerID=? AND Number > 0", (ctrl_id,))
+        if cnt and cnt[0]["c"] >= 16:
+            return jsonify({"error": "シーン数が上限(16)に達しています"}), 400
+
+        next_num_r = q("SELECT ISNULL(MAX(Number),0)+1 AS nn FROM tblScene WHERE ParentSceneControllerID=? AND Number > 0",
+                       (ctrl_id,))
+        next_num = next_num_r[0]["nn"] if next_num_r else 1
+        next_so_r = q("SELECT ISNULL(MAX(SortOrder),0)+1 AS ns FROM tblScene WHERE ParentSceneControllerID=?",
+                      (ctrl_id,))
+        next_so = next_so_r[0]["ns"] if next_so_r else 0
+
+        new_scene_id = _alloc_and_insert("tblScene", "SceneID", {
+            "Name": s["Name"] + " のコピー",
+            "Number": next_num,
+            "SortOrder": next_so,
+            "ParentSceneControllerID": ctrl_id,
+            "IsDaylightingScene": s.get("IsDaylightingScene", 0),
+            "Icon": s.get("Icon", 0),
+            "IsHyperionScene": s.get("IsHyperionScene", 0),
+            "DatabaseRevision": 0,
+            "NeedsTransfer": 1,
+            "TemplateID": None, "TemplateUsedID": None,
+            "TemplateReferenceID": None, "TemplateInstanceNumber": None,
+            "Xid": None,
+        })
+
+        # Mirror row in tblSceneTemplate
+        execute_sql("""
+            INSERT INTO tblSceneTemplate
+            SELECT ?, Name, SortOrder, Number, ParentSceneControllerID, DatabaseRevision,
+                   NeedsTransfer, TemplateID, TemplateUsedID, TemplateReferenceID,
+                   TemplateInstanceNumber, IsDaylightingScene, Icon, IsHyperionScene, Xid, 2
+            FROM tblScene WHERE SceneID = ?
+        """, (new_scene_id, new_scene_id))
+
+        # Copy all zone assignments
+        assignments = q("SELECT * FROM tblPresetAssignment WHERE ParentID=? AND ParentType=41", (scene_id,))
+        for assn in assignments:
+            new_aid = _alloc_and_insert("tblPresetAssignment", "PresetAssignmentID", {
+                "Name": assn.get("Name", ""),
+                "DatabaseRevision": 0,
+                "SortOrder": assn.get("SortOrder", 0),
+                "ParentID": new_scene_id,
+                "ParentType": 41,
+                "AssignableObjectID": assn.get("AssignableObjectID"),
+                "AssignableObjectType": assn.get("AssignableObjectType"),
+                "AssignmentCommandType": assn.get("AssignmentCommandType", 1),
+                "NeedsTransfer": 1,
+                "AssignmentCommandGroup": assn.get("AssignmentCommandGroup", 1),
+                "WhereUsedId": 2147483647,
+                "IsDimmerLocalLoad": assn.get("IsDimmerLocalLoad", 0),
+                "Xid": None, "SmartProgrammingDefaultGUID": None,
+                "TemplateID": None, "TemplateUsedID": None,
+                "TemplateReferenceID": None, "TemplateInstanceNumber": None,
+            })
+            params = q("SELECT ParameterType, ParameterValue FROM tblAssignmentCommandParameter WHERE ParentId=?",
+                       (assn["PresetAssignmentID"],))
+            for p in params:
+                execute_sql("INSERT INTO tblAssignmentCommandParameter (SortOrder,ParentId,ParameterType,ParameterValue) VALUES (0,?,?,?)",
+                            (new_aid, p["ParameterType"], p["ParameterValue"]))
+
+        return jsonify({"scene_id": new_scene_id, "name": s["Name"] + " のコピー", "number": next_num}), 201
+    except Exception as e:
+        import traceback
+        app.logger.error("copy_area_scene error: %s\n%s", e, traceback.format_exc())
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/scene/<int:scene_id>/name", methods=["PUT"])
 def rename_scene(scene_id):
     """Rename an area scene."""
@@ -1292,7 +1432,14 @@ def rename_scene(scene_id):
     if not name:
         return jsonify({"error": "名前が空です"}), 400
     try:
+        old = q("SELECT Name FROM tblScene WHERE SceneID=?", (scene_id,))
+        old_name = old[0]["Name"] if old else ""
         execute_sql("UPDATE tblScene SET Name=? WHERE SceneID=?", (name, scene_id))
+        push_undo(
+            [("UPDATE tblScene SET Name=? WHERE SceneID=?", (old_name, scene_id))],
+            [("UPDATE tblScene SET Name=? WHERE SceneID=?", (name, scene_id))],
+            f"シーン名変更 → {name}"
+        )
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -1535,8 +1682,16 @@ def update_zone(zone_id):
     if not fields:
         return jsonify({"error": "変更なし"}), 400
 
+    old = q(f"SELECT {', '.join(f.split(' = ')[0] for f in fields)} FROM tblZone WHERE ZoneID=?", (zone_id,))
+    old_vals = list(old[0].values()) if old else [None] * len(fields)
+    old_fields_sql = ", ".join(f"{f.split(' = ')[0]} = ?" for f in fields)
     params.append(zone_id)
     execute_sql(f"UPDATE tblZone SET {', '.join(fields)} WHERE ZoneID = ?", params)
+    push_undo(
+        [(f"UPDATE tblZone SET {old_fields_sql} WHERE ZoneID=?", old_vals + [zone_id])],
+        [(f"UPDATE tblZone SET {', '.join(fields)} WHERE ZoneID=?", params)],
+        "ゾーン変更"
+    )
     return jsonify({"ok": True})
 
 
@@ -3096,8 +3251,15 @@ def update_preset(preset_id):
     if not name:
         return jsonify({"error": "名前を入力してください"}), 400
     try:
+        old = q("SELECT Name FROM tblPreset WHERE PresetID=?", (preset_id,))
+        old_name = old[0]["Name"] if old else ""
         execute_sql("UPDATE tblPreset SET Name = ? WHERE PresetID = ? AND PresetType = 1",
                     (name, preset_id))
+        push_undo(
+            [("UPDATE tblPreset SET Name=? WHERE PresetID=?", (old_name, preset_id))],
+            [("UPDATE tblPreset SET Name=? WHERE PresetID=?", (name, preset_id))],
+            f"プリセット名変更 → {name}"
+        )
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -3238,7 +3400,14 @@ def update_preset_name(preset_id):
     name = data.get("name", "").strip()
     if not name:
         return jsonify({"error": "名前が空です"}), 400
+    old = q("SELECT Name FROM tblPreset WHERE PresetID=?", (preset_id,))
+    old_name = old[0]["Name"] if old else ""
     execute_sql("UPDATE tblPreset SET Name=?, NeedsTransfer=1 WHERE PresetID=?", (name, preset_id))
+    push_undo(
+        [("UPDATE tblPreset SET Name=?, NeedsTransfer=1 WHERE PresetID=?", (old_name, preset_id))],
+        [("UPDATE tblPreset SET Name=?, NeedsTransfer=1 WHERE PresetID=?", (name, preset_id))],
+        f"シーン名変更 → {name}"
+    )
     return jsonify({"ok": True})
 
 
@@ -3658,10 +3827,27 @@ def update_assignment(assignment_id):
     # Unaffected: set cmd_type=1, remove all parameters
     if data.get("unaffected"):
         try:
+            old_a = q("SELECT AssignmentCommandType FROM tblPresetAssignment WHERE PresetAssignmentID=?",
+                      (assignment_id,))
+            old_params = q("SELECT ParameterType, ParameterValue FROM tblAssignmentCommandParameter WHERE ParentId=?",
+                           (assignment_id,))
+            old_ct = old_a[0]["AssignmentCommandType"] if old_a else 1
+            undo_sqls = [
+                ("UPDATE tblPresetAssignment SET AssignmentCommandType=?, NeedsTransfer=1 WHERE PresetAssignmentID=?",
+                 (old_ct, assignment_id)),
+                ("DELETE FROM tblAssignmentCommandParameter WHERE ParentId=?", (assignment_id,)),
+            ] + [("INSERT INTO tblAssignmentCommandParameter (SortOrder,ParentId,ParameterType,ParameterValue) VALUES (0,?,?,?)",
+                  (assignment_id, p["ParameterType"], p["ParameterValue"])) for p in old_params]
+            redo_sqls = [
+                ("UPDATE tblPresetAssignment SET AssignmentCommandType=1, NeedsTransfer=1 WHERE PresetAssignmentID=?",
+                 (assignment_id,)),
+                ("DELETE FROM tblAssignmentCommandParameter WHERE ParentId=?", (assignment_id,)),
+            ]
             execute_sql("UPDATE tblPresetAssignment SET AssignmentCommandType=1, NeedsTransfer=1 WHERE PresetAssignmentID=?",
                         (assignment_id,))
             execute_sql("DELETE FROM tblAssignmentCommandParameter WHERE ParentId=?",
                         (assignment_id,))
+            push_undo(undo_sqls, redo_sqls, "Unaffected設定")
             return jsonify({"ok": True})
         except Exception as e:
             return jsonify({"error": str(e)}), 500
@@ -3746,6 +3932,17 @@ def update_assignment(assignment_id):
                 mapping[pt] = int(val)
 
     try:
+        # Capture before-state for undo (only level/fade/delay for simplicity)
+        _undo_ptypes = set(mapping.keys()) | {p for p in roomprop_deletes}
+        _old_params = {}
+        if _undo_ptypes:
+            for row in q("SELECT ParameterType, ParameterValue FROM tblAssignmentCommandParameter WHERE ParentId=?",
+                         (assignment_id,)):
+                _old_params[row["ParameterType"]] = row["ParameterValue"]
+        _old_ct_row = q("SELECT AssignmentCommandType FROM tblPresetAssignment WHERE PresetAssignmentID=?",
+                        (assignment_id,)) if "cmd_type" in data else []
+        _old_ct = _old_ct_row[0]["AssignmentCommandType"] if _old_ct_row else None
+
         for ptype in roomprop_deletes:
             execute_sql("DELETE FROM tblAssignmentCommandParameter WHERE ParentId=? AND ParameterType=?",
                         (assignment_id, ptype))
@@ -3758,6 +3955,33 @@ def update_assignment(assignment_id):
             else:
                 execute_sql("INSERT INTO tblAssignmentCommandParameter (SortOrder,ParentId,ParameterType,ParameterValue) VALUES (?,?,?,?)",
                             (0, assignment_id, ptype, pval))
+
+        # Build undo/redo for level/fade/delay/cmd_type changes
+        if _undo_ptypes or _old_ct is not None:
+            undo_sqls, redo_sqls = [], []
+            if _old_ct is not None:
+                undo_sqls.append(("UPDATE tblPresetAssignment SET AssignmentCommandType=?, NeedsTransfer=1 WHERE PresetAssignmentID=?",
+                                  (_old_ct, assignment_id)))
+                redo_sqls.append(("UPDATE tblPresetAssignment SET AssignmentCommandType=?, NeedsTransfer=1 WHERE PresetAssignmentID=?",
+                                  (int(data["cmd_type"]), assignment_id)))
+            for pt in _undo_ptypes:
+                if pt in _old_params:
+                    undo_sqls.append(("UPDATE tblAssignmentCommandParameter SET ParameterValue=? WHERE ParentId=? AND ParameterType=?",
+                                      (_old_params[pt], assignment_id, pt)))
+                else:
+                    undo_sqls.append(("DELETE FROM tblAssignmentCommandParameter WHERE ParentId=? AND ParameterType=?",
+                                      (assignment_id, pt)))
+                if pt in mapping:
+                    redo_sqls.append(("UPDATE tblAssignmentCommandParameter SET ParameterValue=? WHERE ParentId=? AND ParameterType=?",
+                                      (mapping[pt], assignment_id, pt)))
+                else:
+                    redo_sqls.append(("DELETE FROM tblAssignmentCommandParameter WHERE ParentId=? AND ParameterType=?",
+                                      (assignment_id, pt)))
+            label = f"レベル変更 (ID:{assignment_id})"
+            if "level" in data:
+                label = f"レベル {data['level']}%"
+            push_undo(undo_sqls, redo_sqls, label)
+
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -3815,6 +4039,46 @@ def shutdown():
         drop_db(state["db_name"])
     os.kill(os.getpid(), 9)
     return jsonify({"ok": True})
+
+
+# ── Undo / Redo ───────────────────────────────
+
+@app.route("/api/undo-status")
+def undo_status():
+    us = state["undo_stack"]
+    rs = state["redo_stack"]
+    return jsonify({
+        "can_undo": len(us) > 0,
+        "can_redo": len(rs) > 0,
+        "undo_label": us[-1]["label"] if us else "",
+        "redo_label": rs[-1]["label"] if rs else "",
+    })
+
+
+@app.route("/api/undo", methods=["POST"])
+def do_undo():
+    if not state["undo_stack"]:
+        return jsonify({"error": "元に戻す操作がありません"}), 400
+    op = state["undo_stack"].pop()
+    try:
+        execute_sqls(op["sqls"])
+        state["redo_stack"].append(op)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    return jsonify({"ok": True, "label": op["label"]})
+
+
+@app.route("/api/redo", methods=["POST"])
+def do_redo():
+    if not state["redo_stack"]:
+        return jsonify({"error": "やり直す操作がありません"}), 400
+    op = state["redo_stack"].pop()
+    try:
+        execute_sqls(op["redo_sqls"])
+        state["undo_stack"].append(op)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    return jsonify({"ok": True, "label": op["label"]})
 
 
 # ─────────────────────────────────────────────

@@ -1358,6 +1358,19 @@
             font-size: 11px;
             display: none;
         }
+
+        #ctx-menu {
+            position: fixed; z-index: 9999;
+            background: var(--bg2); border: 1px solid var(--border);
+            border-radius: 4px; min-width: 150px;
+            box-shadow: 0 4px 12px rgba(0,0,0,.45);
+            display: none; padding: 3px 0;
+        }
+        .ctx-item {
+            padding: 6px 14px; font-size: 12px; cursor: pointer;
+            white-space: nowrap;
+        }
+        .ctx-item:hover { background: var(--accent); color: #fff; }
     </style>
 </head>
 
@@ -1372,6 +1385,8 @@
             <input type="file" id="file-input-folder" webkitdirectory directory multiple style="display:none;" onchange="handleFileUpload(event, 'folder')">
             <button class="btn btn-primary" onclick="document.getElementById('file-input-pl').click()">📄 .plを開く</button>
             <button class="btn btn-outline" onclick="document.getElementById('file-input-folder').click()">📁 フォルダを開く</button>
+            <button class="btn btn-outline" id="undo-btn" onclick="_undo()" disabled title="元に戻す (Ctrl+Z)">↩ 元に戻す</button>
+            <button class="btn btn-outline" id="redo-btn" onclick="_redo()" disabled title="やり直す (Ctrl+Y)">↪ やり直す</button>
             <button class="btn btn-success" id="save-btn" onclick="saveFile()" disabled>💾 保存</button>
         </div>
     </header>
@@ -1766,6 +1781,7 @@
                 bar.appendChild(span);
             }
             toast('更新しました');
+            _updateUndoButtons();
             if (reload) await loadDetail(areaId, '');
         }
 
@@ -1845,6 +1861,7 @@
                     : `<span class="scene-num scene-on" style="margin-right:5px;font-size:10px">${s.Number}</span>`;
                 return `<div class="ssc-list-item" id="ascli-${s.SceneID}"
                     onclick="selectAreaScene(${s.SceneID},'${s.Name.replace(/'/g,"\\'")}')"
+                    oncontextmenu="_showCtxMenu(event,[{label:'コピーして追加',action:'_copyAsc('+${s.SceneID}+')'}])"
                 >${numChip}${escHtml(s.Name)}</div>`;
             }).join('');
         }
@@ -1855,6 +1872,45 @@
             const li = document.getElementById(`ascli-${sceneId}`);
             if (li) li.classList.add('active');
             await _loadAscDetail(sceneId);
+        }
+
+        // ── Context menu ──────────────────────────────────────────────
+
+        function _showCtxMenu(e, items) {
+            e.preventDefault(); e.stopPropagation();
+            let m = document.getElementById('ctx-menu');
+            if (!m) {
+                m = document.createElement('div');
+                m.id = 'ctx-menu';
+                document.body.appendChild(m);
+            }
+            m.innerHTML = items.map(it =>
+                `<div class="ctx-item" onclick="document.getElementById('ctx-menu').style.display='none';${it.action}">${it.label}</div>`
+            ).join('');
+            m.style.left = Math.min(e.clientX, window.innerWidth - 170) + 'px';
+            m.style.top  = Math.min(e.clientY, window.innerHeight - 60) + 'px';
+            m.style.display = 'block';
+            setTimeout(() => document.addEventListener('click', () => { m.style.display = 'none'; }, { once: true }), 0);
+        }
+
+        async function _copySsc(presetId) {
+            const res = await fetch(`/api/preset/${presetId}/copy`, { method: 'POST' });
+            const d = await res.json();
+            if (!res.ok) { toast(d.error || 'コピー失敗', 'red'); return; }
+            markDirty();
+            toast(`"${d.name}" を追加しました`);
+            await loadSharedScenes(_sscAreaId);
+            selectSharedScene(d.preset_id, d.name);
+        }
+
+        async function _copyAsc(sceneId) {
+            const res = await fetch(`/api/scene/${sceneId}/copy`, { method: 'POST' });
+            const d = await res.json();
+            if (!res.ok) { toast(d.error || 'コピー失敗', 'red'); return; }
+            markDirty();
+            toast(`"${d.name}" を追加しました`);
+            await loadAreaScenes(_ascAreaId);
+            selectAreaScene(d.scene_id, d.name);
         }
 
         async function _loadAscDetail(sceneId) {
@@ -1947,7 +2003,7 @@
                         body: JSON.stringify({ unaffected: true }),
                     });
                     if (!res.ok) { const d = await res.json().catch(()=>({})); toast(d.error||'更新失敗','red'); }
-                    markDirty();
+                    markDirty(); _updateUndoButtons();
                     _loadAscDetail(sceneId);
                 }
                 return;
@@ -1993,7 +2049,7 @@
                     return;
                 }
             }
-            markDirty();
+            markDirty(); _updateUndoButtons();
             _loadAscDetail(sceneId);
         }
 
@@ -2025,7 +2081,7 @@
                     : `<span class="scene-num scene-on" style="margin-right:5px;font-size:10px">${s ? s.Number : ''}</span>`;
                 li.innerHTML = numChip + escHtml(newName);
             }
-            markDirty();
+            markDirty(); _updateUndoButtons();
             toast('更新しました');
         }
 
@@ -2065,14 +2121,6 @@
                 const res = await fetch(`/api/area/${areaId}/shared-presets`);
                 _sscPresets = await res.json();
                 panel.innerHTML = `
-<div style="padding:5px 8px;border-bottom:1px solid var(--border);display:flex;gap:6px;align-items:center;flex-shrink:0">
-  <span style="font-size:10px;color:var(--text-dim);flex:1">全エリア対象</span>
-  <button class="btn" style="font-size:10px;padding:2px 7px" onclick="_sscExport('xlsx')">Excel出力</button>
-  <button class="btn" style="font-size:10px;padding:2px 7px" onclick="_sscExport('csv')">CSV出力</button>
-  <label class="btn" style="font-size:10px;padding:2px 7px;cursor:pointer;margin:0">
-    取込<input type="file" accept=".xlsx,.csv" style="display:none" onchange="_sscImport(this)">
-  </label>
-</div>
 <div class="ssc-layout" style="flex:1;min-height:0">
   <div style="display:flex;flex-direction:column;width:220px;min-width:160px;flex-shrink:0;border-right:1px solid var(--border)">
     <div style="padding:6px 8px;border-bottom:1px solid var(--border);flex-shrink:0">
@@ -2082,6 +2130,14 @@
     <div class="ssc-list" id="ssc-list" style="width:auto;border-right:none;flex:1"></div>
   </div>
   <div class="ssc-detail-pane">
+    <div style="display:flex;align-items:center;justify-content:flex-end;gap:4px;padding:4px 8px;border-bottom:1px solid var(--border);flex-shrink:0">
+      <span style="font-size:10px;color:var(--text-dim);margin-right:auto">全エリア対象</span>
+      <button class="btn" style="font-size:10px;padding:2px 7px" onclick="_sscExport('xlsx')">Excel出力</button>
+      <button class="btn" style="font-size:10px;padding:2px 7px" onclick="_sscExport('csv')">CSV出力</button>
+      <label class="btn" style="font-size:10px;padding:2px 7px;cursor:pointer;margin:0">
+        取込<input type="file" accept=".xlsx,.csv" style="display:none" onchange="_sscImport(this)">
+      </label>
+    </div>
     <div id="ssc-detail-body" class="ssc-detail-body">
       <div style="color:var(--text-dim);font-size:11px;padding:8px">シーンを選択してください</div>
     </div>
@@ -2116,6 +2172,7 @@
             listEl.innerHTML = _sscPresets.map(p =>
                 `<div class="ssc-list-item" id="sscli-${p.PresetID}"
                       onclick="selectSharedScene(${p.PresetID},'${p.Name.replace(/'/g,"\\'")}')"
+                      oncontextmenu="_showCtxMenu(event,[{label:'コピーして追加',action:'_copySsc('+${p.PresetID}+')'}])"
                 >${escHtml(p.Name)}</div>`
             ).join('');
         }
@@ -3089,6 +3146,62 @@
                 bar.appendChild(span);
             }
         }
+
+        // ── Undo / Redo ────────────────────────────────────────────────
+
+        async function _updateUndoButtons() {
+            try {
+                const r = await fetch('/api/undo-status');
+                const d = await r.json();
+                const ub = document.getElementById('undo-btn');
+                const rb = document.getElementById('redo-btn');
+                if (ub) { ub.disabled = !d.can_undo; ub.title = d.can_undo ? `元に戻す: ${d.undo_label} (Ctrl+Z)` : '元に戻す (Ctrl+Z)'; }
+                if (rb) { rb.disabled = !d.can_redo; rb.title = d.can_redo ? `やり直す: ${d.redo_label} (Ctrl+Y)` : 'やり直す (Ctrl+Y)'; }
+            } catch(e) {}
+        }
+
+        async function _undo() {
+            const res = await fetch('/api/undo', { method: 'POST' });
+            const d = await res.json();
+            if (!res.ok) { toast(d.error || 'Undo失敗', 'red'); return; }
+            markDirty();
+            toast(`元に戻しました: ${d.label}`);
+            _updateUndoButtons();
+            _refreshCurrentPanel();
+        }
+
+        async function _redo() {
+            const res = await fetch('/api/redo', { method: 'POST' });
+            const d = await res.json();
+            if (!res.ok) { toast(d.error || 'Redo失敗', 'red'); return; }
+            markDirty();
+            toast(`やり直しました: ${d.label}`);
+            _updateUndoButtons();
+            _refreshCurrentPanel();
+        }
+
+        function _refreshCurrentPanel() {
+            const areaId = _sscAreaId || _ascAreaId;
+            if (!areaId) return;
+            if (activeDetailTab === 'shared-scenes') loadSharedScenes(areaId);
+            else if (activeDetailTab === 'scenes') loadAreaScenes(areaId);
+            else if (activeDetailTab === 'zones') {
+                // Re-render zones by re-selecting the area
+                const sel = document.querySelector('.area-item.selected');
+                if (sel) sel.click();
+            }
+        }
+
+        // Keyboard shortcuts
+        document.addEventListener('keydown', e => {
+            const tag = (e.target || {}).tagName || '';
+            if (['INPUT', 'TEXTAREA', 'SELECT'].includes(tag)) return;
+            if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key === 'z') {
+                e.preventDefault(); _undo();
+            } else if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.shiftKey && e.key === 'z'))) {
+                e.preventDefault(); _redo();
+            }
+        });
 
         async function reloadPrograms() {
             if (!currentAreaId) return;
@@ -5322,7 +5435,7 @@
             }
             const data = await res.json();
             if (!res.ok) { toast(data.error || 'エラー', 'red'); return; }
-            markDirty();
+            markDirty(); _updateUndoButtons();
             if (uid.startsWith('ssc-')) {
                 _loadSharedSceneDetail(presetId);
             } else {
@@ -5357,7 +5470,7 @@
                 method: 'PATCH', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(fields)
             });
-            markDirty();
+            markDirty(); _updateUndoButtons();
         }
 
         async function _addAction(uid, pmId) {
