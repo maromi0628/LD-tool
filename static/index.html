@@ -2035,6 +2035,27 @@
         let _sscCategory = 'zones';   // selected category in LD-style view
         let _sscCondData = null;       // cached condition data
 
+        function _sscExport(fmt) {
+            window.location.href = `/api/shared-scenes/export?format=${fmt}`;
+        }
+
+        async function _sscImport(input) {
+            const file = input.files[0];
+            if (!file) return;
+            input.value = '';
+            const fd = new FormData();
+            fd.append('file', file);
+            const res = await fetch('/api/shared-scenes/import', { method: 'POST', body: fd });
+            const d = await res.json();
+            if (!res.ok) { toast(d.error || 'インポート失敗', 'red'); return; }
+            markDirty();
+            let msg = `インポート完了: シーン ${d.created_scenes}件作成、アサイン ${d.updated_assignments}件更新`;
+            if (d.errors && d.errors.length) msg += `\n警告 ${d.errors.length}件`;
+            toast(msg, d.errors && d.errors.length ? 'orange' : undefined);
+            if (d.errors && d.errors.length) console.warn('Import warnings:', d.errors);
+            await loadSharedScenes(_sscAreaId);
+        }
+
         async function loadSharedScenes(areaId) {
             const panel = document.getElementById('tab-shared-scenes');
             if (!panel) return;
@@ -2044,7 +2065,15 @@
                 const res = await fetch(`/api/area/${areaId}/shared-presets`);
                 _sscPresets = await res.json();
                 panel.innerHTML = `
-<div class="ssc-layout">
+<div style="padding:5px 8px;border-bottom:1px solid var(--border);display:flex;gap:6px;align-items:center;flex-shrink:0">
+  <span style="font-size:10px;color:var(--text-dim);flex:1">全エリア対象</span>
+  <button class="btn" style="font-size:10px;padding:2px 7px" onclick="_sscExport('xlsx')">Excel出力</button>
+  <button class="btn" style="font-size:10px;padding:2px 7px" onclick="_sscExport('csv')">CSV出力</button>
+  <label class="btn" style="font-size:10px;padding:2px 7px;cursor:pointer;margin:0">
+    取込<input type="file" accept=".xlsx,.csv" style="display:none" onchange="_sscImport(this)">
+  </label>
+</div>
+<div class="ssc-layout" style="flex:1;min-height:0">
   <div style="display:flex;flex-direction:column;width:220px;min-width:160px;flex-shrink:0;border-right:1px solid var(--border)">
     <div style="padding:6px 8px;border-bottom:1px solid var(--border);flex-shrink:0">
       <button class="btn btn-primary" style="width:100%;font-size:11px;padding:3px 0" onclick="_sscAddPreset()"

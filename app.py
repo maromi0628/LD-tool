@@ -14,7 +14,11 @@ import threading
 import webbrowser
 import tkinter as tk
 from tkinter import filedialog
-from flask import Flask, jsonify, request, send_from_directory, send_file
+import io
+import csv
+import openpyxl
+from openpyxl.styles import Font, PatternFill
+from flask import Flask, jsonify, request, send_from_directory, send_file, Response
 
 try:
     import pyodbc
@@ -758,6 +762,238 @@ def area_detail(area_id):
         "stations": stations,
         "buttons": buttons,
         "scenes": scenes,
+    })
+
+
+@app.route("/api/shared-scenes/export")
+def export_shared_scenes():
+    """Export all shared scenes (all areas) with zone assignments as xlsx or csv."""
+    if not state["db_name"]:
+        return jsonify({"error": "DB未接続"}), 400
+    fmt = request.args.get("format", "xlsx").lower()
+
+    rows = q("""
+        SELECT
+            a.Name  AS AreaName,
+            p.Name  AS SceneName,
+            p.SortOrder,
+            z.Name  AS ZoneName,
+            acp3.ParameterValue AS Level,
+            acp1.ParameterValue AS FadeRaw,
+            acp2.ParameterValue AS DelayRaw
+        FROM tblArea a
+        JOIN tblPreset p
+            ON p.ParentID = a.AreaID AND p.PresetType = 3 AND p.ParentType = 2
+        LEFT JOIN tblPresetAssignment pa
+            ON pa.ParentID = p.PresetID AND pa.AssignableObjectType = 15
+        LEFT JOIN tblZone z
+            ON z.ZoneID = pa.AssignableObjectID
+        LEFT JOIN tblAssignmentCommandParameter acp3
+            ON acp3.ParentId = pa.PresetAssignmentID AND acp3.ParameterType = 3
+        LEFT JOIN tblAssignmentCommandParameter acp1
+            ON acp1.ParentId = pa.PresetAssignmentID AND acp1.ParameterType = 1
+        LEFT JOIN tblAssignmentCommandParameter acp2
+            ON acp2.ParentId = pa.PresetAssignmentID AND acp2.ParameterType = 2
+        WHERE a.HierarchyLevel >= 2
+        ORDER BY a.Name, p.SortOrder, p.Name, z.Name
+    """)
+
+    headers = ["Area", "Scene", "Zone", "Level", "Fade(s)", "Delay(s)"]
+    data_rows = []
+    for r in rows:
+        fade  = round(r["FadeRaw"]  / 4, 2) if r["FadeRaw"]  is not None else ""
+        delay = round(r["DelayRaw"] / 4, 2) if r["DelayRaw"] is not None else ""
+        level = r["Level"] if r["Level"] is not None else ""
+        data_rows.append([r["AreaName"], r["SceneName"],
+                          r["ZoneName"] or "", level, fade, delay])
+
+    if fmt == "csv":
+        buf = io.StringIO()
+        csv.writer(buf).writerow(headers)
+        csv.writer(buf).writerows(data_rows)
+        output = buf.getvalue().encode("utf-8-sig")
+        return Response(output, mimetype="text/csv",
+                        headers={"Content-Disposition":
+                                 "attachment; filename=shared_scenes.csv"})
+
+    # xlsx
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Shared Scenes"
+    ws.append(headers)
+    hdr_fill = PatternFill("solid", fgColor="4472C4")
+    hdr_font = Font(bold=True, color="FFFFFF")
+    for cell in ws[1]:
+        cell.fill = hdr_fill
+        cell.font = hdr_font
+    for row in data_rows:
+        ws.append(row)
+    for col in ws.columns:
+        width = max((len(str(c.value or "")) for c in col), default=8)
+        ws.column_dimensions[col[0].column_letter].width = min(width + 2, 40)
+    ws.freeze_panes = "A2"
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return Response(buf.getvalue(),
+                    mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition":
+                             "attachment; filename=shared_scenes.xlsx"})
+
+
+@app.route("/api/shared-scenes/import", methods=["POST"])
+def import_shared_scenes():
+    """Import shared scenes from xlsx or csv.
+    Columns: Area, Scene, Zone, Level, Fade(s), Delay(s)
+    Creates missing scenes; upserts zone assignments.
+    """
+    if not state["db_name"]:
+        return jsonify({"error": "DB未接続"}), 400
+    if "file" not in request.files:
+        return jsonify({"error": "ファイルが必要です"}), 400
+    f = request.files["file"]
+    fname = (f.filename or "").lower()
+
+    # Parse file into list of dicts
+    file_rows = []
+    try:
+        if fname.endswith(".csv"):
+            content = f.read().decode("utf-8-sig")
+            reader = csv.DictReader(io.StringIO(content))
+            file_rows = list(reader)
+        elif fname.endswith(".xlsx"):
+            wb = openpyxl.load_workbook(io.BytesIO(f.read()), read_only=True)
+            ws = wb.active
+            hdrs = [str(c.value or "").strip() for c in next(ws.iter_rows(min_row=1, max_row=1))]
+            for ws_row in ws.iter_rows(min_row=2, values_only=True):
+                file_rows.append(dict(zip(hdrs, ws_row)))
+        else:
+            return jsonify({"error": "xlsx または csv ファイルのみ対応"}), 400
+    except Exception as e:
+        return jsonify({"error": f"ファイル読み込みエラー: {e}"}), 400
+
+    # Cache areas
+    areas = q("SELECT AreaID, Name FROM tblArea WHERE HierarchyLevel >= 2")
+    area_map = {a["Name"]: a["AreaID"] for a in areas}
+
+    created_scenes = 0
+    updated_assignments = 0
+    errors = []
+    scene_cache = {}   # (area_id, scene_name) → preset_id
+
+    for i, row in enumerate(file_rows, start=2):
+        area_name  = str(row.get("Area")    or "").strip()
+        scene_name = str(row.get("Scene")   or "").strip()
+        zone_name  = str(row.get("Zone")    or "").strip()
+        level_str  = str(row.get("Level")   or "").strip()
+        fade_str   = str(row.get("Fade(s)") or "2").strip()
+        delay_str  = str(row.get("Delay(s)") or "0").strip()
+
+        if not area_name or not scene_name:
+            continue
+
+        area_id = area_map.get(area_name)
+        if area_id is None:
+            errors.append(f"行{i}: エリア '{area_name}' が見つかりません")
+            continue
+
+        # Find or create scene
+        cache_key = (area_id, scene_name)
+        if cache_key not in scene_cache:
+            ex = q("""SELECT PresetID FROM tblPreset
+                      WHERE PresetType=3 AND ParentType=2 AND ParentID=? AND Name=?""",
+                   (area_id, scene_name))
+            if ex:
+                scene_cache[cache_key] = ex[0]["PresetID"]
+            else:
+                so = q("""SELECT ISNULL(MAX(SortOrder),-1)+1 AS ns FROM tblPreset
+                          WHERE PresetType=3 AND ParentType=2 AND ParentID=?""",
+                       (area_id,))
+                next_so = so[0]["ns"] if so else 0
+                pid = _alloc_and_insert("tblPreset", "PresetID", {
+                    "Name": scene_name, "DatabaseRevision": 0, "SortOrder": next_so,
+                    "ParentID": area_id, "ParentType": 2,
+                    "NeedsTransfer": 1, "PresetType": 3,
+                    "WhereUsedId": 2147483647, "IsGPDPreset": 0,
+                })
+                scene_cache[cache_key] = pid
+                created_scenes += 1
+
+        preset_id = scene_cache[cache_key]
+
+        # Skip rows with no zone or no level
+        if not zone_name or level_str == "":
+            continue
+
+        try:
+            level = int(float(level_str))
+        except (ValueError, TypeError):
+            errors.append(f"行{i}: レベル値が無効 '{level_str}'")
+            continue
+        try:
+            fade = round(float(fade_str) * 4)
+        except (ValueError, TypeError):
+            fade = 8
+        try:
+            delay = round(float(delay_str) * 4)
+        except (ValueError, TypeError):
+            delay = 0
+
+        # Find zone
+        zr = q("""SELECT ZoneID FROM tblZone
+                  WHERE ParentID=? AND Name=? AND ZoneLayer=0""",
+               (area_id, zone_name))
+        if not zr:
+            errors.append(f"行{i}: ゾーン '{zone_name}' がエリア '{area_name}' に見つかりません")
+            continue
+        zone_id = zr[0]["ZoneID"]
+
+        # Upsert assignment
+        ex_assn = q("""SELECT PresetAssignmentID FROM tblPresetAssignment
+                       WHERE ParentID=? AND AssignableObjectID=? AND AssignableObjectType=15""",
+                    (preset_id, zone_id))
+        try:
+            if ex_assn:
+                aid = ex_assn[0]["PresetAssignmentID"]
+                execute_sql("UPDATE tblPresetAssignment SET NeedsTransfer=1 WHERE PresetAssignmentID=?",
+                            (aid,))
+                for ptype, pval in [(3, level), (1, fade), (2, delay)]:
+                    ep = q("""SELECT 1 FROM tblAssignmentCommandParameter
+                              WHERE ParentId=? AND ParameterType=?""", (aid, ptype))
+                    if ep:
+                        execute_sql("""UPDATE tblAssignmentCommandParameter
+                                       SET ParameterValue=? WHERE ParentId=? AND ParameterType=?""",
+                                    (pval, aid, ptype))
+                    else:
+                        execute_sql("""INSERT INTO tblAssignmentCommandParameter
+                                       (SortOrder,ParentId,ParameterType,ParameterValue)
+                                       VALUES (?,?,?,?)""", (0, aid, ptype, pval))
+            else:
+                sort_r = q("SELECT ISNULL(MAX(SortOrder),0)+1 AS ns FROM tblPresetAssignment WHERE ParentID=?",
+                           (preset_id,))
+                sort = sort_r[0]["ns"] if sort_r else 0
+                aid = _alloc_and_insert("tblPresetAssignment", "PresetAssignmentID", {
+                    "Name": "", "DatabaseRevision": 0, "SortOrder": sort,
+                    "ParentID": preset_id, "ParentType": 43,
+                    "AssignableObjectID": zone_id, "AssignableObjectType": 15,
+                    "AssignmentCommandType": 2, "NeedsTransfer": 1,
+                    "AssignmentCommandGroup": 1, "WhereUsedId": 2147483647,
+                })
+                for ptype, pval in [(3, level), (1, fade), (2, delay)]:
+                    execute_sql("""INSERT INTO tblAssignmentCommandParameter
+                                   (SortOrder,ParentId,ParameterType,ParameterValue)
+                                   VALUES (?,?,?,?)""", (0, aid, ptype, pval))
+            updated_assignments += 1
+        except Exception as e:
+            errors.append(f"行{i}: DB書き込みエラー: {e}")
+
+    if updated_assignments > 0 or created_scenes > 0:
+        state["dirty"] = True
+    return jsonify({
+        "ok": True,
+        "created_scenes": created_scenes,
+        "updated_assignments": updated_assignments,
+        "errors": errors,
     })
 
 
