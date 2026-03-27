@@ -1060,12 +1060,12 @@
             min-height: 0;
         }
 
-        /* When Shared Scenes tab is active, stop #detail from scrolling so
+        /* When Shared Scenes or Scenes tab is active, stop #detail from scrolling so
            the two panels inside .ssc-layout scroll independently */
-        #detail.ssc-active {
+        #detail.ssc-active, #detail.scenes-active {
             overflow-y: hidden;
         }
-        #detail.ssc-active .card {
+        #detail.ssc-active .card, #detail.scenes-active .card {
             flex: 1;
             display: flex;
             flex-direction: column;
@@ -1073,6 +1073,12 @@
             min-height: 0;
         }
         #detail.ssc-active #tab-shared-scenes.active {
+            display: flex;
+            flex: 1;
+            overflow: hidden;
+            min-height: 0;
+        }
+        #detail.scenes-active #tab-scenes.active {
             display: flex;
             flex: 1;
             overflow: hidden;
@@ -1636,7 +1642,7 @@
         ${d.zones.length ? zonesTableHtml(d.zones, areaId) : '<div class="loading" style="padding:16px">Zonesなし</div>'}
       </div>
       <div id="tab-scenes" class="tab-panel ${tab === 'scenes' ? 'active' : ''}">
-        ${d.scenes.length ? scenesBodyHtml(d.scenes) : '<div class="loading" style="padding:16px">Scenesなし</div>'}
+        <div class="loading" style="padding:16px">読み込み中…</div>
       </div>
       <div id="tab-keypads" class="tab-panel ${tab === 'keypads' ? 'active' : ''}">
         ${d.stations.length ? keypadsBodyHtml(d.stations, d.buttons) : '<div class="loading" style="padding:16px">Keypadsなし</div>'}
@@ -1650,7 +1656,9 @@
     </div>
   `;
             detail.classList.toggle('ssc-active', tab === 'shared-scenes');
+            detail.classList.toggle('scenes-active', tab === 'scenes');
             if (tab === 'shared-scenes') loadSharedScenes(areaId);
+            if (tab === 'scenes') loadAreaScenes(areaId);
         }
 
         function switchDetailTab(tabName, areaId, areaName) {
@@ -1663,7 +1671,9 @@
             if (tabs[idx]) tabs[idx].classList.add('active');
             document.getElementById('tab-' + tabName).classList.add('active');
             document.getElementById('detail').classList.toggle('ssc-active', tabName === 'shared-scenes');
+            document.getElementById('detail').classList.toggle('scenes-active', tabName === 'scenes');
             if (tabName === 'shared-scenes') loadSharedScenes(areaId);
+            if (tabName === 'scenes') loadAreaScenes(areaId);
         }
 
         // ── Zones ─────────────────────────────────────
@@ -1759,7 +1769,7 @@
             if (reload) await loadDetail(areaId, '');
         }
 
-        // ── Scenes ────────────────────────────────────
+        // ── Scenes (chip helper – used in station cards) ──────────────────────
         function scenesBodyHtml(scenes) {
             const chips = scenes.map(s => `<div class="scene-chip">
     <span class="scene-num ${s.Number === 0 ? 'scene-off' : 'scene-on'}">${s.Number === 0 ? 'Off' : s.Number}</span>
@@ -1769,6 +1779,220 @@
         function renderScenesCard(scenes) {
             if (!scenes.length) return '';
             return `<div class="card"><div class="card-header">Scenes <span class="count">${scenes.length}</span></div>${scenesBodyHtml(scenes)}</div>`;
+        }
+
+        // ── Area Scenes tab ────────────────────────────────────────────────────
+        let _ascScenes = [];
+        let _ascAmbientZones = [];
+        let _ascAreaId = null;
+        let _ascCurrentSceneId = null;
+
+        async function loadAreaScenes(areaId) {
+            const panel = document.getElementById('tab-scenes');
+            if (!panel) return;
+            _ascAreaId = areaId;
+            panel.innerHTML = '<div class="loading" style="padding:16px">読み込み中…</div>';
+            try {
+                const res = await fetch(`/api/area/${areaId}/scenes-full`);
+                const d = await res.json();
+                _ascScenes = d.scenes || [];
+                _ascAmbientZones = d.ambient_zones || [];
+                if (!_ascScenes.length) {
+                    panel.innerHTML = '<div class="loading" style="padding:16px">Scenesなし</div>';
+                    return;
+                }
+                panel.innerHTML = `
+<div class="ssc-layout">
+  <div style="display:flex;flex-direction:column;width:220px;min-width:160px;flex-shrink:0;border-right:1px solid var(--border)">
+    <div class="ssc-list" id="asc-list" style="width:auto;border-right:none;flex:1"></div>
+  </div>
+  <div class="ssc-detail-pane">
+    <div id="asc-detail-body" class="ssc-detail-body">
+      <div style="color:var(--text-dim);font-size:11px;padding:8px">シーンを選択してください</div>
+    </div>
+  </div>
+</div>`;
+                _renderAscList();
+                selectAreaScene(_ascScenes[0].SceneID, _ascScenes[0].Name);
+            } catch (e) {
+                panel.innerHTML = '<div class="loading" style="padding:16px;color:var(--red)">読み込みエラー</div>';
+            }
+        }
+
+        function _renderAscList() {
+            const listEl = document.getElementById('asc-list');
+            if (!listEl) return;
+            listEl.innerHTML = _ascScenes.map(s => {
+                const numChip = s.Number === 0
+                    ? `<span class="scene-num scene-off" style="margin-right:5px;font-size:10px">Off</span>`
+                    : `<span class="scene-num scene-on" style="margin-right:5px;font-size:10px">${s.Number}</span>`;
+                return `<div class="ssc-list-item" id="ascli-${s.SceneID}"
+                    onclick="selectAreaScene(${s.SceneID},'${s.Name.replace(/'/g,"\\'")}')"
+                >${numChip}${escHtml(s.Name)}</div>`;
+            }).join('');
+        }
+
+        async function selectAreaScene(sceneId, name) {
+            _ascCurrentSceneId = sceneId;
+            document.querySelectorAll('#asc-list .ssc-list-item').forEach(el => el.classList.remove('active'));
+            const li = document.getElementById(`ascli-${sceneId}`);
+            if (li) li.classList.add('active');
+            await _loadAscDetail(sceneId);
+        }
+
+        async function _loadAscDetail(sceneId) {
+            const body = document.getElementById('asc-detail-body');
+            if (!body) return;
+            body.innerHTML = '<div style="color:var(--text-dim);font-size:11px;padding:8px">読み込み中…</div>';
+            try {
+                const res = await fetch(`/api/scene/${sceneId}/assignments`);
+                const assignments = await res.json();
+                _renderAscDetail(sceneId, assignments);
+            } catch (e) {
+                body.innerHTML = '<div style="color:var(--red);font-size:11px;padding:8px">読み込みエラー</div>';
+            }
+        }
+
+        function _renderAscDetail(sceneId, assignments) {
+            const body = document.getElementById('asc-detail-body');
+            if (!body) return;
+            const scene = _ascScenes.find(s => s.SceneID === sceneId);
+            const sceneName = scene ? scene.Name : '';
+            const sceneNum = scene ? scene.Number : '';
+
+            // Header with editable name
+            let header = `<div style="display:flex;align-items:center;gap:8px;padding:6px 0 10px;border-bottom:1px solid var(--border);margin-bottom:10px">
+  <span class="scene-num ${sceneNum === 0 ? 'scene-off' : 'scene-on'}" style="font-size:11px">${sceneNum === 0 ? 'Off' : sceneNum}</span>
+  <span id="asc-detail-name" style="font-size:12px;font-weight:600;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+        onclick="this.style.display='none';document.getElementById('asc-name-inp').style.display='';document.getElementById('asc-name-inp').focus()"
+        title="クリックして編集">${escHtml(sceneName)}</span>
+  <input id="asc-name-inp" class="ssc-name-input" style="display:none"
+         value="${escHtml(sceneName)}"
+         onblur="_ascSaveName(${sceneId},this)"
+         onkeydown="if(event.key==='Enter')this.blur();if(event.key==='Escape'){this.style.display='none';document.getElementById('asc-detail-name').style.display='';}">
+</div>`;
+
+            if (!_ascAmbientZones.length) {
+                body.innerHTML = header + '<div style="color:var(--text-dim);font-size:11px;padding:4px">このエリアにAmbientゾーンがありません</div>';
+                return;
+            }
+
+            const rows = _ascAmbientZones.map(z => {
+                const a = assignments[z.ZoneID];
+                const level = a && a.level !== null ? a.level : null;
+                const aid = a ? a.aid : null;
+                const hasLevel = level !== null;
+                const selId = `asc-sel-${sceneId}-${z.ZoneID}`;
+                const numId = `asc-num-${sceneId}-${z.ZoneID}`;
+                // Determine which preset option to show, or "custom"
+                const PRESETS = [100, 75, 50, 25, 0];
+                const isPreset = hasLevel && PRESETS.includes(level);
+                const selVal = hasLevel ? (isPreset ? level : 'custom') : 'unaffected';
+                const presetOpts = PRESETS.map(v =>
+                    `<option value="${v}"${selVal == v ? ' selected' : ''}>${v}%</option>`
+                ).join('');
+                const customSel = !hasLevel || isPreset ? '' : `<option value="custom" selected>カスタム</option>`;
+                return `<div style="display:flex;align-items:center;gap:6px;padding:5px 0;border-bottom:1px solid var(--border)">
+  <span style="font-size:11px;width:170px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex-shrink:0"
+        title="${escHtml(z.Name)}">${escHtml(z.Name)}</span>
+  <select id="${selId}" style="font-size:11px;flex:1;min-width:90px;max-width:120px"
+          onchange="_ascSelChange(this,${sceneId},${z.ZoneID},${aid ?? 'null'})">
+    <option value="unaffected"${!hasLevel ? ' selected' : ''}>Unaffected</option>
+    ${presetOpts}
+    ${customSel}
+  </select>
+  <input type="number" id="${numId}" min="0" max="100" value="${hasLevel ? level : 100}"
+         style="width:46px;font-size:11px;display:${(!hasLevel || isPreset) ? 'none' : ''}"
+         onchange="_ascPatchLevel(${aid ?? 'null'},this.value,${sceneId},${z.ZoneID})">
+  <span style="font-size:10px;color:var(--text-dim);display:${hasLevel ? '' : 'none'}" id="asc-pct-${sceneId}-${z.ZoneID}">%</span>
+</div>`;
+            }).join('');
+
+            body.innerHTML = header + `<div>${rows}</div>`;
+        }
+
+        async function _ascSelChange(sel, sceneId, zoneId, existingAid) {
+            const val = sel.value;
+            const numId = `asc-num-${sceneId}-${zoneId}`;
+            const pctId = `asc-pct-${sceneId}-${zoneId}`;
+            const numEl = document.getElementById(numId);
+            const pctEl = document.getElementById(pctId);
+
+            if (val === 'unaffected') {
+                // Remove assignment
+                if (numEl) numEl.style.display = 'none';
+                if (pctEl) pctEl.style.display = 'none';
+                if (existingAid !== null) {
+                    await fetch(`/api/assignment/${existingAid}`, { method: 'DELETE' });
+                    markDirty();
+                    _loadAscDetail(sceneId);
+                }
+                return;
+            }
+            if (val === 'custom') {
+                // Show number input, don't save yet
+                if (numEl) { numEl.style.display = ''; numEl.focus(); numEl.select(); }
+                if (pctEl) pctEl.style.display = '';
+                return;
+            }
+            // Preset value selected
+            if (numEl) numEl.style.display = 'none';
+            if (pctEl) pctEl.style.display = '';
+            await _ascSetLevel(parseInt(val), sceneId, zoneId, existingAid);
+        }
+
+        async function _ascSetLevel(level, sceneId, zoneId, existingAid) {
+            if (existingAid !== null) {
+                await fetch(`/api/assignment/${existingAid}`, {
+                    method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ cmd_type: 2, level }),
+                });
+            } else {
+                const res = await fetch(`/api/scene/${sceneId}/zone`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ zone_id: zoneId, level, fade: 2, delay: 0 }),
+                });
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({}));
+                    toast(err.error || '追加エラー', 'red');
+                    _loadAscDetail(sceneId);
+                    return;
+                }
+            }
+            markDirty();
+            _loadAscDetail(sceneId);
+        }
+
+        async function _ascPatchLevel(aid, level, sceneId, zoneId) {
+            const selEl = document.getElementById(`asc-sel-${sceneId}-${zoneId}`);
+            await _ascSetLevel(parseInt(level), sceneId, zoneId, aid);
+        }
+
+        async function _ascSaveName(sceneId, inp) {
+            const newName = inp.value.trim();
+            const nameEl = document.getElementById('asc-detail-name');
+            inp.style.display = 'none';
+            if (nameEl) nameEl.style.display = '';
+            if (!newName) return;
+            const res = await fetch(`/api/scene/${sceneId}/name`, {
+                method: 'PUT', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name: newName }),
+            });
+            if (!res.ok) { toast('名前の更新に失敗しました', 'red'); return; }
+            // Update local cache
+            const s = _ascScenes.find(x => x.SceneID === sceneId);
+            if (s) s.Name = newName;
+            if (nameEl) nameEl.textContent = newName;
+            // Update list item
+            const li = document.getElementById(`ascli-${sceneId}`);
+            if (li) {
+                const numChip = s && s.Number === 0
+                    ? `<span class="scene-num scene-off" style="margin-right:5px;font-size:10px">Off</span>`
+                    : `<span class="scene-num scene-on" style="margin-right:5px;font-size:10px">${s ? s.Number : ''}</span>`;
+                li.innerHTML = numChip + escHtml(newName);
+            }
+            markDirty();
+            toast('更新しました');
         }
 
         // ── Shared Scenes ─────────────────────────────
@@ -1875,6 +2099,8 @@
         }
 
         async function _sscToggleItem(checked, presetId, itemType, itemId, ctrl, existingAid) {
+            // 'zones' category → API expects 'zone'
+            if (itemType === 'zones') itemType = 'zone';
             if (checked) {
                 const body = { item_type: itemType, item_id: itemId, delay: 0 };
                 if (itemType === 'zone' || itemType === 'cco') {
@@ -2153,10 +2379,10 @@
                     const cid = `ssc-rp-${r.RentableSpaceID}`;
                     if (a) {
                         const aid = a.PresetAssignmentID;
-                        const UNAFFECTED = 65280;
                         const props = a.props || {};
-                        const summary = [[149,'Presence'],[150,'Emergency'],[151,'DND'],[152,'RoomState'],[153,'MUR']]
-                            .map(([pid,nm]) => { const v=props[pid]; return (v===undefined||v===UNAFFECTED)?null:`${nm}:${v===1?'On':'Off'}`; })
+                        const _rpLabel = {149:{1:'On',0:'Off'},151:{1:'Enb',0:'Dis'},152:{0:'ChkIn',1:'ChkOut'},153:{1:'Enb',0:'Dis'}};
+                        const summary = [[149,'Presence'],[151,'DND'],[152,'RoomState'],[153,'MUR']]
+                            .map(([pid,nm]) => { const v=props[pid]; return (v===null||v===undefined)?null:`${nm}:${(_rpLabel[pid]||{})[v]??v}`; })
                             .filter(Boolean).join(' ') || 'All Unaffected';
                         html += `<div class="ssc-cat-row"><input type="checkbox" id="${cid}" checked onchange="_sscToggleItem(this.checked,${presetId},'roomprop',${r.RentableSpaceID},0,${aid})"><label for="${cid}" class="ssc-cat-label">${escHtml(r.RoomName)}</label><span style="color:var(--text-dim);font-size:10px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${summary}</span><button class="prog-add-btn" style="padding:1px 6px;font-size:10px" onclick="_editRoomProps(${aid},'ssc-${presetId}',0,${presetId})">編集</button>${delayCtrl(aid,a.delay??0)}${dBtn(aid)}</div>`;
                     } else {
@@ -4612,11 +4838,11 @@
 
                     } else if (ot === 400) {
                         const name = a.RoomPropName || `ID:${a.AssignableObjectID}`;
-                        const UNAFFECTED = 65280;
                         const props = a.props || {};
-                        const propSummary = [[149, 'Presence'], [150, 'Emergency'], [151, 'DND'], [152, 'RoomState'], [153, 'MUR']]
-                            .map(([pid, nm]) => { const v = props[pid]; return (v === undefined || v === UNAFFECTED) ? null : `${nm}:${v === 1 ? 'On' : 'Off'}`; })
-                            .filter(Boolean).join(' ') || 'All Unaffected';
+                        const _rpLbl = {149:{1:'On',0:'Off'},151:{1:'Enb',0:'Dis'},152:{0:'ChkIn',1:'ChkOut'},153:{1:'Enb',0:'Dis'}};
+                        const propSummary = [[149, 'Presence'], [151, 'DND'], [152, 'RoomState'], [153, 'MUR']]
+                            .map(([pid, nm]) => { const v = props[pid]; return (v === null || v === undefined) ? null : `${nm}:${(_rpLbl[pid]||{})[v]??v}`; })
+                            .filter(Boolean).join(', ') || 'All Unaffected';
                         html += `<div class="action-zone-row">
           <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${name}">🏠 ${name}</span>
           <span style="color:var(--text-dim);font-size:10px;max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${propSummary}">${propSummary}</span>
@@ -4923,18 +5149,29 @@
       <label>Delay (s)</label><input id="ap-delay" type="number" min="0" max="3600" value="0">`;
 
             } else if (type === 'roomprop') {
-                const UNAFFECTED = 65280;
                 const currentProps = itemData.currentProps || {};
-                const propDefs = [[149, 'Presence Status'], [150, 'Emergency Mode'], [151, 'Do Not Disturb'], [152, 'Room State'], [153, 'Make Up Room']];
-                paramsHtml = propDefs.map(([pid, pname]) => {
-                    const cur = currentProps[pid] !== undefined ? currentProps[pid] : UNAFFECTED;
+                // Confirmed from LD scene names:
+                // PT76=RoomState(152):0=CheckIn,1=CheckOut  PT77=Presence(149):1=On,0=Off
+                // PT78=FGE(154):1=True,0=False  PT79=Turndown(155):1=Enabled,0=Disabled
+                // PT80=DND(151):1=Enabled,0=Disabled  PT81=MUR(153):1=Enabled,0=Disabled
+                const propDefs = [
+                    [152, 'Room State',       [[0, 'Check In'], [1, 'Check Out']]],
+                    [151, 'Do Not Disturb',   [[1, 'Enabled'],  [0, 'Disabled']]],
+                    [153, 'Make Up Room',     [[1, 'Enabled'],  [0, 'Disabled']]],
+                    [154, 'First Guest Entry',[[1, 'True'],     [0, 'False']]],
+                    [155, 'Turndown Service', [[1, 'Enabled'],  [0, 'Disabled']]],
+                    [157, 'Automation',       [[1, 'Enabled'],  [0, 'Disabled']]],
+                    [149, 'Presence Status',  [[1, 'On'],       [0, 'Off']]],
+                ];
+                paramsHtml = propDefs.map(([pid, pname, opts]) => {
+                    const cur = (currentProps[pid] !== undefined && currentProps[pid] !== null) ? currentProps[pid] : '';
+                    const optHtml = opts.map(([v, l]) => `<option value="${v}"${String(cur) === String(v) ? ' selected' : ''}>${l}</option>`).join('');
                     return `<label>${pname}</label>
       <select id="ap-prop-${pid}">
-        <option value="${UNAFFECTED}"${cur === UNAFFECTED ? ' selected' : ''}>Unaffected</option>
-        <option value="1"${cur === 1 ? ' selected' : ''}>On</option>
-        <option value="0"${cur === 0 ? ' selected' : ''}>Off</option>
+        <option value=""${cur === '' ? ' selected' : ''}>Unaffected</option>
+        ${optHtml}
       </select>`;
-                }).join('') + `<label>Delay (s)</label><input id="ap-delay" type="number" min="0" max="3600" value="${itemData.currentDelay || 0}">`;
+                }).join('');
 
             } else if (type === 'integration') {
                 paramsHtml = `<label>Delay (s)</label><input id="ap-delay" type="number" min="0" max="3600" value="0">`;
@@ -4988,12 +5225,14 @@
             } else if (type === 'occupancy') {
                 body.level = level;
             } else if (type === 'roomprop') {
-                const UNAFFECTED = 65280;
                 body.props = {};
-                [149, 150, 151, 152, 153].forEach(pid => {
+                [152, 151, 153, 154, 155, 157, 149].forEach(pid => {
                     const el = document.getElementById(`ap-prop-${pid}`);
-                    body.props[String(pid)] = el ? parseInt(el.value) : UNAFFECTED;
+                    if (el) {
+                        body.props[String(pid)] = el.value === '' ? null : parseInt(el.value);
+                    }
                 });
+                delete body.delay;
             } else if (type !== 'hvac' && type !== 'integration') {
                 const ctrl = (itemData && itemData.ctrl) || 0;
                 const isSsc = uid.startsWith('ssc-');
@@ -5030,15 +5269,14 @@
         function _editRoomProps(aid, uid, pmId, presetId) {
             const a = _assignmentDataMap[aid];
             if (!a) return;
-            const UNAFFECTED = 65280;
             const props = a.props || {};
             const currentProps = {};
-            [149, 150, 151, 152, 153].forEach(pid => {
-                currentProps[pid] = props[pid] !== undefined ? props[pid] : UNAFFECTED;
+            [152, 151, 153, 154, 155, 157, 149].forEach(pid => {
+                currentProps[pid] = (props[pid] !== undefined && props[pid] !== null) ? props[pid] : null;
             });
             const itemData = {
                 id: a.AssignableObjectID, name: a.RoomPropName || `ID:${a.AssignableObjectID}`,
-                currentProps, currentDelay: a.delay || 0
+                currentProps
             };
             _openActionParamModal(uid, pmId, presetId, 'roomprop', itemData, aid);
         }

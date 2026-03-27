@@ -418,6 +418,20 @@ def load_project(work_dir, template_id=None):
         state["lut_path"] = lut
         state["template_id"] = tmpl_zip_name
         state["tmpl_zip_name"] = tmpl_zip_name
+        # Repair: remove invalid value=2 written to Room Property PT rows by old UI code.
+        # LD encoding: 65280=Unaffected, 0=second state(Disabled/Off), 1=first state(Enabled/On).
+        # value=2 does not exist in LD's enum and causes IndexOutOfRangeException.
+        try:
+            execute_sql("""
+                DELETE FROM tblAssignmentCommandParameter
+                WHERE ParameterValue = 2
+                  AND ParentId IN (
+                      SELECT PresetAssignmentID FROM tblPresetAssignment
+                      WHERE AssignableObjectType = 400
+                  )
+            """)
+        except Exception as _e:
+            app.logger.warning(f"[load_project] Room Property invalid value cleanup failed: {_e}")
 
 
 def backup_lut_from_db(db_name, dest_lut_path):
@@ -516,6 +530,47 @@ def index():
 def get_diagnostics():
     """Return SQL Server connectivity diagnostics."""
     return jsonify({"report": diagnose_sql()})
+
+
+@app.route("/api/debug/roomprop-assignments")
+def debug_roomprop_assignments():
+    """Dump all Room Property assignments with scene name and human-readable PT values."""
+    if not state["db_name"]:
+        return jsonify({"error": "DB未接続"}), 400
+    # PT → property name mapping (for display only)
+    PT_NAMES = {76: "RoomState(152)", 77: "Presence(149)", 78: "FGE(154)",
+                79: "Turndown(155)", 80: "DND(151)", 81: "MUR(153)", 84: "Auto(157)"}
+    rows = q("""
+        SELECT pa.PresetAssignmentID, pa.ParentID, pa.ParentType,
+               pa.AssignableObjectType, pa.AssignmentCommandType, pa.AssignmentCommandGroup,
+               p.Name AS SceneName, p.PresetType,
+               ar.Name AS AreaName
+        FROM tblPresetAssignment pa
+        LEFT JOIN tblPreset p ON p.PresetID = pa.ParentID
+        LEFT JOIN tblArea ar ON ar.AreaID = p.ParentID
+        WHERE pa.AssignableObjectType = 400
+        ORDER BY pa.ParentID, pa.PresetAssignmentID
+    """)
+    result = []
+    for row in rows:
+        aid = row["PresetAssignmentID"]
+        params = q("SELECT ParameterType, ParameterValue FROM tblAssignmentCommandParameter WHERE ParentId=? ORDER BY ParameterType", (aid,))
+        pt_map = {p["ParameterType"]: p["ParameterValue"] for p in params}
+        decoded = {}
+        for pt, val in pt_map.items():
+            name = PT_NAMES.get(pt, f"PT{pt}")
+            decoded[name] = "Unaffected(65280)" if val == 65280 else str(val)
+        result.append({
+            "PresetAssignmentID": aid,
+            "ParentID": row["ParentID"],
+            "ParentType": row["ParentType"],
+            "SceneName": row["SceneName"],
+            "PresetType": row["PresetType"],
+            "AreaName": row["AreaName"],
+            "raw_params": pt_map,
+            "decoded": decoded,
+        })
+    return jsonify(result)
 
 
 @app.route("/api/open", methods=["POST"])
@@ -752,8 +807,120 @@ def create_shared_preset(area_id):
         "ParentID": area_id,
         "SortOrder": next_so,
         "NeedsTransfer": 1,
+        "DatabaseRevision": 0,
+        "WhereUsedId": 2147483647,
+        "IsGPDPreset": 0,
     })
     return jsonify({"preset_id": preset_id, "name": name, "sort_order": next_so}), 201
+
+
+# ── Area Scenes ────────────────────────────────────────────────────────────────
+
+@app.route("/api/area/<int:area_id>/scenes-full")
+def area_scenes_full(area_id):
+    """Return scenes list and ambient zones for an area."""
+    if not state["db_name"]:
+        return jsonify({"error": "DB未接続"}), 400
+    scenes = q("""
+        SELECT s.SceneID, s.Name, s.Number
+        FROM tblSceneController sc
+        JOIN tblScene s ON s.ParentSceneControllerID = sc.SceneControllerID
+        WHERE sc.ParentID = ? AND sc.ParentType = 2
+        ORDER BY s.Number
+    """, (area_id,))
+    ambient_zones = q("""
+        SELECT z.ZoneID, z.Name, z.ZoneNumber AS LoadNumber, z.ControlType
+        FROM tblZone z
+        WHERE z.ParentID = ? AND z.ZoneLayer = 0
+        ORDER BY z.ZoneNumber
+    """, (area_id,))
+    return jsonify({"scenes": scenes, "ambient_zones": ambient_zones})
+
+
+@app.route("/api/scene/<int:scene_id>/assignments")
+def scene_assignments(scene_id):
+    """Return zone assignments for an area scene, keyed by ZoneID."""
+    if not state["db_name"]:
+        return jsonify({"error": "DB未接続"}), 400
+    rows = q("""
+        SELECT pa.PresetAssignmentID, pa.AssignableObjectID AS ZoneID,
+               pa.AssignmentCommandType
+        FROM tblPresetAssignment pa
+        WHERE pa.ParentID = ? AND pa.AssignableObjectType = 15
+    """, (scene_id,))
+    result = {}
+    for row in rows:
+        params = q("""
+            SELECT ParameterType, ParameterValue
+            FROM tblAssignmentCommandParameter WHERE ParentId = ?
+        """, (row["PresetAssignmentID"],))
+        pm = {p["ParameterType"]: p["ParameterValue"] for p in params}
+        # PT=3 absent means "Unaffected" — return None so frontend can distinguish
+        level = pm.get(3)  # None if not found
+        result[row["ZoneID"]] = {
+            "aid": row["PresetAssignmentID"],
+            "cmd_type": row["AssignmentCommandType"],
+            "level": level,
+            "fade":  round(pm.get(1, 0) / 4, 2),
+            "delay": round(pm.get(2, 0) / 4, 2),
+        }
+    return jsonify(result)
+
+
+@app.route("/api/scene/<int:scene_id>/zone", methods=["POST"])
+def add_scene_zone(scene_id):
+    """Add a zone assignment to an area scene."""
+    if not state["db_name"]:
+        return jsonify({"error": "DB未接続"}), 400
+    data = request.json or {}
+    zone_id = data.get("zone_id")
+    if zone_id is None:
+        return jsonify({"error": "zone_id が必要です"}), 400
+    # Check not already assigned
+    existing = q("""
+        SELECT PresetAssignmentID FROM tblPresetAssignment
+        WHERE ParentID=? AND AssignableObjectID=? AND AssignableObjectType=15
+    """, (scene_id, zone_id))
+    if existing:
+        return jsonify({"error": "このゾーンはすでに割り当て済みです"}), 400
+    level = int(data.get("level", 100))
+    fade  = round(float(data.get("fade", 2)) * 4)   # seconds → 250ms units
+    delay = round(float(data.get("delay", 0)) * 4)
+    try:
+        aid = _alloc_and_insert("tblPresetAssignment", "PresetAssignmentID", {
+            "ParentID": scene_id,
+            "AssignableObjectID": zone_id,
+            "AssignableObjectType": 15,
+            "AssignmentCommandType": 2,
+            "AssignmentCommandGroup": 1,
+            "DatabaseRevision": 0,
+            "SortOrder": 0,
+            "NeedsTransfer": 1,
+        })
+        for ptype, pval in [(3, level), (1, fade), (2, delay)]:
+            execute_sql("""
+                INSERT INTO tblAssignmentCommandParameter
+                    (SortOrder, ParentId, ParameterType, ParameterValue)
+                VALUES (?, ?, ?, ?)
+            """, (0, aid, ptype, pval))
+        return jsonify({"aid": aid, "level": level})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/scene/<int:scene_id>/name", methods=["PUT"])
+def rename_scene(scene_id):
+    """Rename an area scene."""
+    if not state["db_name"]:
+        return jsonify({"error": "DB未接続"}), 400
+    name = (request.json or {}).get("name", "").strip()
+    if not name:
+        return jsonify({"error": "名前が空です"}), 400
+    try:
+        execute_sql("UPDATE tblScene SET Name=? WHERE SceneID=?", (name, scene_id))
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 # ── Load type master ──────────────────────────
@@ -1632,6 +1799,51 @@ def zone_full_compare(existing_id, new_id):
     })
 
 
+@app.route("/api/scene-template-debug")
+def scene_template_debug():
+    """Temporary: inspect tblSceneTemplate structure."""
+    if not state["db_name"]:
+        return jsonify({"error": "DB未接続"}), 400
+    cols = _try_q("""
+        SELECT COLUMN_NAME, DATA_TYPE
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_NAME = 'tblSceneTemplate'
+        ORDER BY ORDINAL_POSITION
+    """)
+    sample = _try_q("SELECT TOP 5 * FROM tblSceneTemplate")
+    # Also get scenes for area 72 (Bathroom) joined with template
+    bathroom = _try_q("""
+        SELECT TOP 20 s.SceneID, s.Name AS SceneName, s.Number,
+               st.*
+        FROM tblSceneController sc
+        JOIN tblScene s ON s.ParentSceneControllerID = sc.SceneControllerID
+        LEFT JOIN tblSceneTemplate st ON st.ParentSceneID = s.SceneID
+        WHERE sc.ParentID = 72 AND sc.ParentType = 2
+        ORDER BY s.Number
+    """)
+    # Bathroom SceneIDs: 76-80 — check if tblPresetAssignment has them as ParentID
+    pa_check = _try_q("""
+        SELECT TOP 20 pa.PresetAssignmentID, pa.ParentID, pa.AssignableObjectType,
+               pa.AssignableObjectID, pa.AssignmentCommandType,
+               acp.ParameterType, acp.ParameterValue
+        FROM tblPresetAssignment pa
+        LEFT JOIN tblAssignmentCommandParameter acp ON acp.ParentId = pa.PresetAssignmentID
+        WHERE pa.ParentID IN (76,77,78,79,80)
+    """)
+    # All PresetType/ParentType combos
+    preset_types = _try_q("""
+        SELECT PresetType, ParentType, COUNT(*) AS cnt
+        FROM tblPreset GROUP BY PresetType, ParentType ORDER BY cnt DESC
+    """)
+    # tblScene and tblSceneController column names
+    scene_cols = _try_q("""
+        SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_NAME = 'tblScene' ORDER BY ORDINAL_POSITION
+    """)
+    return jsonify({"columns": cols, "pa_check": pa_check,
+                    "preset_types": preset_types, "scene_cols": scene_cols})
+
+
 @app.route("/api/area/<int:area_id>/debug")
 def debug_area(area_id):
     """Full dump of all zones+switchlegs in an area for comparison."""
@@ -2320,6 +2532,13 @@ def cond_debug():
             WHERE sc.ParentType = 2
             ORDER BY sc.ParentID, s.Number
         """),
+        "scene_template_columns": q("""
+            SELECT COLUMN_NAME, DATA_TYPE
+            FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_NAME = 'tblSceneTemplate'
+            ORDER BY ORDINAL_POSITION
+        """),
+        "scene_template_sample": q("SELECT TOP 10 * FROM tblSceneTemplate"),
     })
 
 
@@ -2746,14 +2965,24 @@ def list_preset_assignments(preset_id):
         elif ot == 38:
             a["level"] = pm.get(35, 1)          # Occupancy state 1/2/4
         elif ot == 400:
-            # Confirmed: PT76-80 → prop_ids 149-153, PT81=always Unaffected
-            UNAFFECTED = 65280
+            # Confirmed from scene names in LD DB:
+            # "Check in room"=PT76:0, "Check Out Room"=PT76:1 → PT76=RoomState(152) 0=CheckIn,1=CheckOut
+            # "On/Off Level" PT77=1/0 → PT77=Presence(149) 1=On,0=Off
+            # "First key->True" PT78=1 → PT78=FGE(154) 1=True,0=False
+            # "TURNDOWN ON" PT79=1 → PT79=Turndown(155) 1=Enabled,0=Disabled
+            # "DND ON/OFF" PT80=1/0 → PT80=DND(151) 1=Enabled,0=Disabled
+            # "MUR ON/OFF" PT81=1/0 → PT81=MUR(153) 1=Enabled,0=Disabled
+            # PT84=Automation(157) 1=Enabled,0=Disabled
+            # Absent row OR value=65280 → Unaffected (null)
+            def _rp(v): return None if (v is None or v == 65280) else v
             a["props"] = {
-                149: pm.get(76, UNAFFECTED),
-                150: pm.get(77, UNAFFECTED),
-                151: pm.get(78, UNAFFECTED),
-                152: pm.get(79, UNAFFECTED),
-                153: pm.get(80, UNAFFECTED),
+                152: _rp(pm.get(76)),  # RoomState
+                149: _rp(pm.get(77)),  # Presence
+                154: _rp(pm.get(78)),  # FGE
+                155: _rp(pm.get(79)),  # Turndown
+                151: _rp(pm.get(80)),  # DND
+                153: _rp(pm.get(81)),  # MUR
+                157: _rp(pm.get(84)),  # Automation
             }
             a["level"] = None
         elif ot == 211:
@@ -2966,21 +3195,23 @@ def add_preset_assignment(preset_id):
         params = [(0, 35, state_val), (1, 2, delay)]
 
     elif item_type == "roomprop":
-        # Confirmed: ObjType=400, CmdType=80, CmdGroup=47
-        # PT76-80 = prop_ids 149-153 (pt = prop_id - 73), PT81 = always Unaffected
-        # Values: 0=Off, 1=On, 65280=Unaffected
+        # Confirmed from LD scene names: ObjType=400, CmdType=80, CmdGroup=47
+        # PT76=RoomState(152) 0=CheckIn,1=CheckOut
+        # PT77=Presence(149) 1=On,0=Off
+        # PT78=FGE(154) 1=True,0=False
+        # PT79=Turndown(155) 1=Enabled,0=Disabled
+        # PT80=DND(151) 1=Enabled,0=Disabled
+        # PT81=MUR(153) 1=Enabled,0=Disabled
+        # PT84=Automation(157) 1=Enabled,0=Disabled
         item_id = int(data.get("item_id", 34))
         obj_type, cmd_type, cmd_group = 400, 80, 47
-        UNAFFECTED = 65280
-        PROP_TO_PT = {149: 76, 150: 77, 151: 78, 152: 79, 153: 80}
-        props = data.get("props", {})  # { "149": 0/1/65280, ... }
-        delay = int(data.get("delay", 0))
+        PROP_TO_PT = {152: 76, 149: 77, 154: 78, 155: 79, 151: 80, 153: 81, 157: 84}
+        props = data.get("props", {})  # only explicitly set values; absent key = Unaffected
         params = []
-        for prop_id_int, pt in sorted(PROP_TO_PT.items(), key=lambda x: x[1]):
-            val = int(props.get(str(prop_id_int), UNAFFECTED))
-            params.append((pt - 76, pt, val))
-        params.append((5, 81, UNAFFECTED))
-        params.append((6, 2, round(float(data.get("delay", 0)) * 4)))
+        for sort_i, (prop_id_int, pt) in enumerate(sorted(PROP_TO_PT.items(), key=lambda x: x[1])):
+            val = props.get(str(prop_id_int))
+            if val is not None:  # None = Unaffected, skip (no row)
+                params.append((sort_i, pt, int(val)))
 
     elif item_type == "integration":
         # ObjType=202 (IntegrationCommandSet), confirmed CmdType=52, CmdGroup=36
@@ -3084,9 +3315,12 @@ def update_assignment(assignment_id):
         if "fan" in data["hvac"]:
             mapping[48] = 255 if int(data["hvac"]["fan"]) == 0 else int(data["hvac"]["fan"])
 
-    # Room property props dict (ObjType=400)
+    # Room property: None/null → DELETE row (Unaffected = no row)
+    # PT76=RoomState(152), PT77=Presence(149), PT78=FGE(154), PT79=Turndown(155)
+    # PT80=DND(151), PT81=MUR(153), PT84=Automation(157)
+    roomprop_deletes = []
     if "props" in data and isinstance(data["props"], dict):
-        PROP_TO_PT = {149: 76, 150: 77, 151: 78, 152: 79, 153: 80}
+        PROP_TO_PT = {152: 76, 149: 77, 154: 78, 155: 79, 151: 80, 153: 81, 157: 84}
         for prop_id_str, val in data["props"].items():
             try:
                 prop_id = int(prop_id_str)
@@ -3095,9 +3329,15 @@ def update_assignment(assignment_id):
             if prop_id not in PROP_TO_PT:
                 continue
             pt = PROP_TO_PT[prop_id]
-            mapping[pt] = int(val)
+            if val is None:  # Unaffected: delete PT row
+                roomprop_deletes.append(pt)
+            else:
+                mapping[pt] = int(val)
 
     try:
+        for ptype in roomprop_deletes:
+            execute_sql("DELETE FROM tblAssignmentCommandParameter WHERE ParentId=? AND ParameterType=?",
+                        (assignment_id, ptype))
         for ptype, pval in mapping.items():
             rows = q("SELECT 1 FROM tblAssignmentCommandParameter WHERE ParentId=? AND ParameterType=?",
                      (assignment_id, ptype))
