@@ -1797,26 +1797,43 @@
                 const d = await res.json();
                 _ascScenes = d.scenes || [];
                 _ascAmbientZones = d.ambient_zones || [];
-                if (!_ascScenes.length) {
-                    panel.innerHTML = '<div class="loading" style="padding:16px">Scenesなし</div>';
-                    return;
-                }
+                const atLimit = _ascScenes.length >= 16;
                 panel.innerHTML = `
 <div class="ssc-layout">
   <div style="display:flex;flex-direction:column;width:220px;min-width:160px;flex-shrink:0;border-right:1px solid var(--border)">
+    <div style="padding:6px 8px;border-bottom:1px solid var(--border);flex-shrink:0">
+      <button class="btn btn-primary" style="width:100%;font-size:11px;padding:3px 0" onclick="_ascAddScene()"
+        ${atLimit ? 'disabled title="上限16個"' : ''}>＋ Scene 追加</button>
+    </div>
     <div class="ssc-list" id="asc-list" style="width:auto;border-right:none;flex:1"></div>
   </div>
   <div class="ssc-detail-pane">
     <div id="asc-detail-body" class="ssc-detail-body">
-      <div style="color:var(--text-dim);font-size:11px;padding:8px">シーンを選択してください</div>
+      <div style="color:var(--text-dim);font-size:11px;padding:8px">${_ascScenes.length ? 'シーンを選択してください' : 'Scenesなし'}</div>
     </div>
   </div>
 </div>`;
                 _renderAscList();
-                selectAreaScene(_ascScenes[0].SceneID, _ascScenes[0].Name);
+                if (_ascScenes.length) selectAreaScene(_ascScenes[0].SceneID, _ascScenes[0].Name);
             } catch (e) {
                 panel.innerHTML = '<div class="loading" style="padding:16px;color:var(--red)">読み込みエラー</div>';
             }
+        }
+
+        async function _ascAddScene() {
+            const name = prompt('新しいArea Scene名を入力してください:');
+            if (!name || !name.trim()) return;
+            const res = await fetch(`/api/area/${_ascAreaId}/scenes`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name: name.trim() })
+            });
+            const d = await res.json();
+            if (!res.ok) { toast(d.error || '追加失敗', 'red'); return; }
+            markDirty();
+            toast(`"${d.name}" を追加しました`);
+            await loadAreaScenes(_ascAreaId);
+            selectAreaScene(d.scene_id, d.name);
         }
 
         function _renderAscList() {
@@ -1891,7 +1908,7 @@
                 const presetOpts = PRESETS.map(v =>
                     `<option value="${v}"${selVal == v ? ' selected' : ''}>${v}%</option>`
                 ).join('');
-                const customSel = !hasLevel || isPreset ? '' : `<option value="custom" selected>カスタム</option>`;
+                const customOpt = `<option value="custom"${selVal === 'custom' ? ' selected' : ''}>カスタム</option>`;
                 return `<div style="display:flex;align-items:center;gap:6px;padding:5px 0;border-bottom:1px solid var(--border)">
   <span style="font-size:11px;width:170px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex-shrink:0"
         title="${escHtml(z.Name)}">${escHtml(z.Name)}</span>
@@ -1899,11 +1916,13 @@
           onchange="_ascSelChange(this,${sceneId},${z.ZoneID},${aid ?? 'null'})">
     <option value="unaffected"${!hasLevel ? ' selected' : ''}>Unaffected</option>
     ${presetOpts}
-    ${customSel}
+    ${customOpt}
   </select>
-  <input type="number" id="${numId}" min="0" max="100" value="${hasLevel ? level : 100}"
+  <input type="number" id="${numId}" min="0" max="100" value="${hasLevel ? level : ''}"
          style="width:46px;font-size:11px;display:${(!hasLevel || isPreset) ? 'none' : ''}"
-         onchange="_ascPatchLevel(${aid ?? 'null'},this.value,${sceneId},${z.ZoneID})">
+         placeholder="0-100"
+         onchange="_ascPatchLevel(${aid ?? 'null'},this.value,${sceneId},${z.ZoneID})"
+         onkeydown="if(event.key==='Enter'){event.preventDefault();this.blur()}">
   <span style="font-size:10px;color:var(--text-dim);display:${hasLevel ? '' : 'none'}" id="asc-pct-${sceneId}-${z.ZoneID}">%</span>
 </div>`;
             }).join('');
@@ -1919,19 +1938,27 @@
             const pctEl = document.getElementById(pctId);
 
             if (val === 'unaffected') {
-                // Remove assignment
                 if (numEl) numEl.style.display = 'none';
                 if (pctEl) pctEl.style.display = 'none';
                 if (existingAid !== null) {
-                    await fetch(`/api/assignment/${existingAid}`, { method: 'DELETE' });
+                    // Keep row but set cmd_type=1 (LD requires row even for Unaffected)
+                    const res = await fetch(`/api/assignment/${existingAid}`, {
+                        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ unaffected: true }),
+                    });
+                    if (!res.ok) { const d = await res.json().catch(()=>({})); toast(d.error||'更新失敗','red'); }
                     markDirty();
                     _loadAscDetail(sceneId);
                 }
                 return;
             }
             if (val === 'custom') {
-                // Show number input, don't save yet
-                if (numEl) { numEl.style.display = ''; numEl.focus(); numEl.select(); }
+                if (numEl) {
+                    numEl.style.display = '';
+                    // Clear value so onchange always fires regardless of typed value
+                    numEl.value = existingAid !== null ? numEl.value : '';
+                    numEl.focus();
+                }
                 if (pctEl) pctEl.style.display = '';
                 return;
             }
@@ -1942,11 +1969,18 @@
         }
 
         async function _ascSetLevel(level, sceneId, zoneId, existingAid) {
+            if (isNaN(level) || level < 0 || level > 100) return;
             if (existingAid !== null) {
-                await fetch(`/api/assignment/${existingAid}`, {
+                const res = await fetch(`/api/assignment/${existingAid}`, {
                     method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ cmd_type: 2, level }),
+                    body: JSON.stringify({ cmd_type: 2, level, fade: 2, delay: 0 }),
                 });
+                if (!res.ok) {
+                    const d = await res.json().catch(() => ({}));
+                    toast(d.error || '更新失敗', 'red');
+                    _loadAscDetail(sceneId);
+                    return;
+                }
             } else {
                 const res = await fetch(`/api/scene/${sceneId}/zone`, {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -4650,6 +4684,7 @@
             if (actions.length) {
                 html += `<select id="${uid}-action-sel" style="flex:1;min-width:100px"
       onchange="_loadActionAssignments('${uid}',${pmId},parseInt(this.value))">${opts}</select>`;
+                html += `<button class="prog-add-btn" title="アクション名を変更" onclick="_renameAction('${uid}',${pmId})">✏</button>`;
                 html += `<button class="prog-del-btn" title="アクションを削除" onclick="_deleteAction('${uid}',${pmId})">✕</button>`;
             } else {
                 html += `<span style="color:var(--text-dim);font-size:11px">アクションなし</span>`;
@@ -5304,6 +5339,26 @@
             const r2 = await fetch(`/api/pm/${pmId}/actions`);
             const actions = await r2.json();
             _renderActionsPanel(uid, pmId, actions, data.preset_id);
+        }
+
+        async function _renameAction(uid, pmId) {
+            const sel = document.getElementById(`${uid}-action-sel`);
+            if (!sel) return;
+            const presetId = parseInt(sel.value);
+            const currentName = sel.options[sel.selectedIndex]?.text || '';
+            const name = prompt('新しいアクション名を入力してください:', currentName);
+            if (!name || !name.trim()) return;
+            const res = await fetch(`/api/preset/${presetId}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name: name.trim() })
+            });
+            const d = await res.json();
+            if (!res.ok) { toast(d.error || '名前変更失敗', 'red'); return; }
+            markDirty();
+            const r2 = await fetch(`/api/pm/${pmId}/actions`);
+            const actions = await r2.json();
+            _renderActionsPanel(uid, pmId, actions, presetId);
         }
 
         async function _deleteAction(uid, pmId) {

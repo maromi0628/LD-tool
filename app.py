@@ -4,6 +4,7 @@ Supports .pl files (ZIP archive) and extracted folders.
 """
 
 import os
+import re
 import uuid
 import sqlite3
 import zipfile
@@ -886,17 +887,42 @@ def add_scene_zone(scene_id):
     level = int(data.get("level", 100))
     fade  = round(float(data.get("fade", 2)) * 4)   # seconds → 250ms units
     delay = round(float(data.get("delay", 0)) * 4)
+
+    # Use an existing PresetAssignment row for this scene as a column template
+    # to avoid NOT NULL surprises (ParentType, WhereUsedId, etc.)
+    tmpl_rows = q("""
+        SELECT TOP 1 * FROM tblPresetAssignment WHERE ParentID = ?
+    """, (scene_id,))
+    if not tmpl_rows:
+        # Fall back to any scene assignment in the DB
+        tmpl_rows = q("""
+            SELECT TOP 1 pa.* FROM tblPresetAssignment pa
+            JOIN tblScene s ON s.SceneID = pa.ParentID
+        """)
+
     try:
-        aid = _alloc_and_insert("tblPresetAssignment", "PresetAssignmentID", {
-            "ParentID": scene_id,
-            "AssignableObjectID": zone_id,
-            "AssignableObjectType": 15,
-            "AssignmentCommandType": 2,
-            "AssignmentCommandGroup": 1,
-            "DatabaseRevision": 0,
-            "SortOrder": 0,
-            "NeedsTransfer": 1,
-        })
+        if tmpl_rows:
+            row = dict(tmpl_rows[0])
+            row.pop("PresetAssignmentID", None)
+        else:
+            row = {"WhereUsedId": 2147483647, "IsDimmerLocalLoad": 0}
+        # Explicitly set all required fields (don't rely on template values)
+        row["Name"] = ""
+        row["ParentID"] = scene_id
+        row["ParentType"] = 41          # confirmed from DB: scene assignments use 41
+        row["AssignableObjectID"] = zone_id
+        row["AssignableObjectType"] = 15
+        row["AssignmentCommandType"] = 2
+        row["AssignmentCommandGroup"] = 1
+        row["DatabaseRevision"] = 0
+        row["SortOrder"] = 0
+        row["NeedsTransfer"] = 1
+        # Clear nullable unique fields so they don't duplicate from template
+        row["Xid"] = None
+        row["SmartProgrammingDefaultGUID"] = None
+        for f in ("TemplateID", "TemplateUsedID", "TemplateReferenceID", "TemplateInstanceNumber"):
+            row[f] = None
+        aid = _alloc_and_insert("tblPresetAssignment", "PresetAssignmentID", row)
         for ptype, pval in [(3, level), (1, fade), (2, delay)]:
             execute_sql("""
                 INSERT INTO tblAssignmentCommandParameter
@@ -905,6 +931,119 @@ def add_scene_zone(scene_id):
             """, (0, aid, ptype, pval))
         return jsonify({"aid": aid, "level": level})
     except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/area/<int:area_id>/scenes", methods=["POST"])
+def create_area_scene(area_id):
+    """Create a new area scene. Max 16 scenes per area."""
+    if not state["db_name"]:
+        return jsonify({"error": "DB未接続"}), 400
+    data = request.json or {}
+    name = data.get("name", "").strip()
+    if not name:
+        return jsonify({"error": "名前が空です"}), 400
+
+    # Get SceneController for this area
+    sc_rows = q("""
+        SELECT SceneControllerID FROM tblSceneController
+        WHERE ParentID = ? AND ParentType = 2
+    """, (area_id,))
+    if not sc_rows:
+        return jsonify({"error": "このエリアにSceneControllerがありません"}), 400
+    sc_id = sc_rows[0]["SceneControllerID"]
+
+    # Check 16-scene limit
+    count_rows = q("""
+        SELECT COUNT(*) AS cnt FROM tblScene
+        WHERE ParentSceneControllerID = ?
+    """, (sc_id,))
+    count = count_rows[0]["cnt"] if count_rows else 0
+    if count >= 16:
+        return jsonify({"error": f"Area Sceneは最大16個です（現在{count}個）"}), 400
+
+    # Use an existing scene as column template to avoid NOT NULL surprises
+    template_rows = q("""
+        SELECT TOP 1 * FROM tblScene WHERE ParentSceneControllerID = ?
+        ORDER BY Number
+    """, (sc_id,))
+
+    # Next Number and SortOrder
+    num_rows = q("""
+        SELECT ISNULL(MAX(Number), 0) + 1 AS next_num,
+               ISNULL(MAX(SortOrder), -1) + 1 AS next_so
+        FROM tblScene WHERE ParentSceneControllerID = ?
+    """, (sc_id,))
+    next_num = num_rows[0]["next_num"] if num_rows else 1
+    next_so  = num_rows[0]["next_so"]  if num_rows else 0
+
+    try:
+        if template_rows:
+            row = dict(template_rows[0])
+            row.pop("SceneID", None)
+        else:
+            row = {
+                "IsDaylightingScene": 0,
+                "Icon": "",
+                "IsHyperionScene": 0,
+            }
+        # Override/set key fields for the new scene
+        row["Name"] = name
+        row["Number"] = next_num
+        row["SortOrder"] = next_so
+        row["ParentSceneControllerID"] = sc_id
+        row["DatabaseRevision"] = 0
+        row["NeedsTransfer"] = 1
+        # Clear template linkage so new scene is standalone
+        for f in ("TemplateID", "TemplateUsedID", "TemplateReferenceID",
+                  "TemplateInstanceNumber", "Xid"):
+            row[f] = None
+
+        scene_id = _alloc_and_insert("tblScene", "SceneID", row)
+
+        # Insert corresponding tblSceneTemplate row (LD requires 1-to-1 shadow entry)
+        st_row = dict(row)
+        st_row["SceneID"] = scene_id
+        st_row["AssignmentCommandType"] = 2   # extra column in tblSceneTemplate
+        col_str = ", ".join(st_row.keys())
+        ph_str  = ", ".join(["?"] * len(st_row))
+        execute_sql(f"INSERT INTO tblSceneTemplate ({col_str}) VALUES ({ph_str})",
+                    list(st_row.values()))
+
+        # Pre-create Unaffected (cmd_type=1) rows for all ambient zones
+        # LD requires every zone to have a tblPresetAssignment row even for Unaffected
+        ambient_zones = q("""
+            SELECT ZoneID FROM tblZone WHERE ParentID = ? AND ZoneLayer = 0
+        """, (area_id,))
+        pa_tmpl_rows = q("""
+            SELECT TOP 1 * FROM tblPresetAssignment WHERE ParentType = 41
+        """)
+        for z in ambient_zones:
+            if pa_tmpl_rows:
+                pa_row = dict(pa_tmpl_rows[0])
+                pa_row.pop("PresetAssignmentID", None)
+            else:
+                pa_row = {"WhereUsedId": 2147483647, "IsDimmerLocalLoad": 0}
+            pa_row["Name"] = ""
+            pa_row["ParentID"] = scene_id
+            pa_row["ParentType"] = 41
+            pa_row["AssignableObjectID"] = z["ZoneID"]
+            pa_row["AssignableObjectType"] = 15
+            pa_row["AssignmentCommandType"] = 1   # Unaffected
+            pa_row["AssignmentCommandGroup"] = 1
+            pa_row["DatabaseRevision"] = 0
+            pa_row["SortOrder"] = 0
+            pa_row["NeedsTransfer"] = 1
+            pa_row["Xid"] = None
+            pa_row["SmartProgrammingDefaultGUID"] = None
+            for f in ("TemplateID", "TemplateUsedID", "TemplateReferenceID", "TemplateInstanceNumber"):
+                pa_row[f] = None
+            _alloc_and_insert("tblPresetAssignment", "PresetAssignmentID", pa_row)
+
+        return jsonify({"scene_id": scene_id, "name": name, "number": next_num})
+    except Exception as e:
+        import traceback
+        app.logger.error("create_area_scene error: %s\n%s", e, traceback.format_exc())
         return jsonify({"error": str(e)}), 500
 
 
@@ -1329,7 +1468,6 @@ def table_search():
     if not table or not column or not ids:
         return jsonify({"rows": []})
     # Validate table/column names (allow only alphanumeric + underscore)
-    import re
     if not re.match(r'^[A-Za-z0-9_]+$', table) or not re.match(r'^[A-Za-z0-9_]+$', column):
         return jsonify({"error": "invalid name"}), 400
     ph = ",".join("?" * len(ids))
@@ -1801,47 +1939,61 @@ def zone_full_compare(existing_id, new_id):
 
 @app.route("/api/scene-template-debug")
 def scene_template_debug():
-    """Temporary: inspect tblSceneTemplate structure."""
+    """Inspect tblSceneTemplate structure and tblPresetAssignment schema for scenes."""
     if not state["db_name"]:
         return jsonify({"error": "DB未接続"}), 400
-    cols = _try_q("""
-        SELECT COLUMN_NAME, DATA_TYPE
+
+    # tblPresetAssignment columns + nullable info
+    pa_cols = _try_q("""
+        SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_DEFAULT
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_NAME = 'tblPresetAssignment'
+        ORDER BY ORDINAL_POSITION
+    """)
+
+    # Existing scene assignments: what ParentType do they use?
+    pa_scene_sample = _try_q("""
+        SELECT TOP 5 pa.*
+        FROM tblPresetAssignment pa
+        JOIN tblScene s ON s.SceneID = pa.ParentID
+    """)
+
+    # tblSceneTemplate columns
+    st_cols = _try_q("""
+        SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_DEFAULT
         FROM INFORMATION_SCHEMA.COLUMNS
         WHERE TABLE_NAME = 'tblSceneTemplate'
         ORDER BY ORDINAL_POSITION
     """)
-    sample = _try_q("SELECT TOP 5 * FROM tblSceneTemplate")
-    # Also get scenes for area 72 (Bathroom) joined with template
-    bathroom = _try_q("""
-        SELECT TOP 20 s.SceneID, s.Name AS SceneName, s.Number,
-               st.*
-        FROM tblSceneController sc
-        JOIN tblScene s ON s.ParentSceneControllerID = sc.SceneControllerID
-        LEFT JOIN tblSceneTemplate st ON st.ParentSceneID = s.SceneID
-        WHERE sc.ParentID = 72 AND sc.ParentType = 2
-        ORDER BY s.Number
-    """)
-    # Bathroom SceneIDs: 76-80 — check if tblPresetAssignment has them as ParentID
-    pa_check = _try_q("""
-        SELECT TOP 20 pa.PresetAssignmentID, pa.ParentID, pa.AssignableObjectType,
-               pa.AssignableObjectID, pa.AssignmentCommandType,
-               acp.ParameterType, acp.ParameterValue
+
+    # All distinct AssignmentCommandType values used in scene assignments
+    pa_cmd_types = _try_q("""
+        SELECT DISTINCT pa.AssignmentCommandType,
+               COUNT(*) AS cnt,
+               MIN(pa.PresetAssignmentID) AS sample_aid
         FROM tblPresetAssignment pa
+        JOIN tblScene s ON s.SceneID = pa.ParentID
+        GROUP BY pa.AssignmentCommandType
+    """)
+
+    # Scene assignments for zones — show full detail including parameter values
+    # Find a scene that has the most zone assignments (likely LD-created with all zones set)
+    pa_full_sample = _try_q("""
+        SELECT TOP 20 pa.PresetAssignmentID, pa.ParentID AS SceneID,
+               pa.AssignableObjectID AS ZoneID, pa.AssignableObjectType,
+               pa.AssignmentCommandType, pa.AssignmentCommandGroup,
+               acp.ParameterType, acp.ParameterValue,
+               s.Name AS SceneName
+        FROM tblPresetAssignment pa
+        JOIN tblScene s ON s.SceneID = pa.ParentID
         LEFT JOIN tblAssignmentCommandParameter acp ON acp.ParentId = pa.PresetAssignmentID
-        WHERE pa.ParentID IN (76,77,78,79,80)
+        ORDER BY pa.ParentID, pa.PresetAssignmentID
     """)
-    # All PresetType/ParentType combos
-    preset_types = _try_q("""
-        SELECT PresetType, ParentType, COUNT(*) AS cnt
-        FROM tblPreset GROUP BY PresetType, ParentType ORDER BY cnt DESC
-    """)
-    # tblScene and tblSceneController column names
-    scene_cols = _try_q("""
-        SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
-        WHERE TABLE_NAME = 'tblScene' ORDER BY ORDINAL_POSITION
-    """)
-    return jsonify({"columns": cols, "pa_check": pa_check,
-                    "preset_types": preset_types, "scene_cols": scene_cols})
+
+    return jsonify({
+        "pa_cmd_types_used_in_scenes": pa_cmd_types,
+        "pa_full_sample": pa_full_sample,
+    })
 
 
 @app.route("/api/area/<int:area_id>/debug")
@@ -2669,12 +2821,24 @@ def create_pm_action(pm_id):
     if not state["db_name"]:
         return jsonify({"error": "DB未接続"}), 400
     existing = q("""
-        SELECT ISNULL(MAX(SortOrder), 0) AS max_sort
-        FROM tblPreset
+        SELECT Name FROM tblPreset
         WHERE PresetType = 1 AND ParentType = 231 AND ParentID = ?
     """, (pm_id,))
-    next_sort = (existing[0]["max_sort"] or 0) + 1
-    name = f"Action {next_sort:03d}"
+    sort_row = q("""
+        SELECT ISNULL(MAX(SortOrder), 0) AS max_sort FROM tblPreset
+        WHERE PresetType = 1 AND ParentType = 231 AND ParentID = ?
+    """, (pm_id,))
+    # Auto-increment: find next unused "Action NNN" number
+    used_nums = set()
+    for r in existing:
+        m = re.match(r'^Action (\d+)$', r.get("Name", ""))
+        if m:
+            used_nums.add(int(m.group(1)))
+    n = 1
+    while n in used_nums:
+        n += 1
+    name = f"Action {n:03d}"
+    next_sort = (sort_row[0]["max_sort"] if sort_row else 0) + 1
     try:
         preset_id = _alloc_and_insert("tblPreset", "PresetID", {
             "Name": name, "DatabaseRevision": 0, "SortOrder": next_sort,
@@ -3255,10 +3419,21 @@ def update_assignment(assignment_id):
         return jsonify({"error": "DB未接続"}), 400
     data = request.json or {}
 
+    # Unaffected: set cmd_type=1, remove all parameters
+    if data.get("unaffected"):
+        try:
+            execute_sql("UPDATE tblPresetAssignment SET AssignmentCommandType=1, NeedsTransfer=1 WHERE PresetAssignmentID=?",
+                        (assignment_id,))
+            execute_sql("DELETE FROM tblAssignmentCommandParameter WHERE ParentId=?",
+                        (assignment_id,))
+            return jsonify({"ok": True})
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
     # Update AssignmentCommandType if requested (e.g. sequence Start→Pause)
     if "cmd_type" in data:
         try:
-            execute_sql("UPDATE tblPresetAssignment SET AssignmentCommandType=? WHERE PresetAssignmentID=?",
+            execute_sql("UPDATE tblPresetAssignment SET AssignmentCommandType=?, NeedsTransfer=1 WHERE PresetAssignmentID=?",
                         (int(data["cmd_type"]), assignment_id))
         except Exception as e:
             return jsonify({"error": str(e)}), 500
