@@ -3812,6 +3812,17 @@ def add_preset_assignment(preset_id):
             execute_sql(
                 "INSERT INTO tblAssignmentCommandParameter (SortOrder,ParentId,ParameterType,ParameterValue) VALUES (?,?,?,?)",
                 (sort_p, aid, ptype, pval))
+        # Undo: delete the created assignment + params
+        undo_sqls = [
+            ("DELETE FROM tblAssignmentCommandParameter WHERE ParentId=?", (aid,)),
+            ("DELETE FROM tblPresetAssignment WHERE PresetAssignmentID=?", (aid,)),
+        ]
+        redo_sqls = [
+            ("INSERT INTO tblPresetAssignment (PresetAssignmentID,Name,DatabaseRevision,SortOrder,ParentID,ParentType,AssignableObjectID,AssignableObjectType,AssignmentCommandType,NeedsTransfer,AssignmentCommandGroup,WhereUsedId) VALUES (?,?,0,?,?,43,?,?,?,1,?,2147483647)",
+             (aid, "", sort, preset_id, item_id, obj_type, cmd_type, cmd_group)),
+        ] + [("INSERT INTO tblAssignmentCommandParameter (SortOrder,ParentId,ParameterType,ParameterValue) VALUES (?,?,?,?)",
+              (sort_p, aid, ptype, pval)) for sort_p, ptype, pval in params]
+        push_undo(undo_sqls, redo_sqls, "アサイン追加")
         return jsonify({"assignment_id": aid})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -3993,8 +4004,25 @@ def delete_assignment(assignment_id):
     if not state["db_name"]:
         return jsonify({"error": "DB未接続"}), 400
     try:
+        old_a = q("SELECT * FROM tblPresetAssignment WHERE PresetAssignmentID=?", (assignment_id,))
+        old_params = q("SELECT ParameterType, ParameterValue FROM tblAssignmentCommandParameter WHERE ParentId=?",
+                       (assignment_id,))
         execute_sql("DELETE FROM tblAssignmentCommandParameter WHERE ParentId = ?", (assignment_id,))
         execute_sql("DELETE FROM tblPresetAssignment WHERE PresetAssignmentID = ?", (assignment_id,))
+        if old_a:
+            a = old_a[0]
+            undo_sqls = [
+                ("INSERT INTO tblPresetAssignment (PresetAssignmentID,Name,DatabaseRevision,SortOrder,ParentID,ParentType,AssignableObjectID,AssignableObjectType,AssignmentCommandType,NeedsTransfer,AssignmentCommandGroup,WhereUsedId) VALUES (?,?,?,?,?,?,?,?,?,1,?,2147483647)",
+                 (assignment_id, a.get("Name",""), a.get("DatabaseRevision",0), a.get("SortOrder",0),
+                  a["ParentID"], a["ParentType"], a["AssignableObjectID"], a["AssignableObjectType"],
+                  a["AssignmentCommandType"], a.get("AssignmentCommandGroup",1))),
+            ] + [("INSERT INTO tblAssignmentCommandParameter (SortOrder,ParentId,ParameterType,ParameterValue) VALUES (0,?,?,?)",
+                  (assignment_id, p["ParameterType"], p["ParameterValue"])) for p in old_params]
+            redo_sqls = [
+                ("DELETE FROM tblAssignmentCommandParameter WHERE ParentId=?", (assignment_id,)),
+                ("DELETE FROM tblPresetAssignment WHERE PresetAssignmentID=?", (assignment_id,)),
+            ]
+            push_undo(undo_sqls, redo_sqls, "アサイン削除")
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500

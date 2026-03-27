@@ -2253,7 +2253,7 @@
                 if (existingAid === null) return;
                 await fetch(`/api/assignment/${existingAid}`, { method: 'DELETE' });
             }
-            markDirty();
+            markDirty(); _updateUndoButtons();
             _loadSharedSceneDetail(presetId);
         }
 
@@ -2273,7 +2273,7 @@
                 if (existingAid === null) return;
                 await fetch(`/api/assignment/${existingAid}`, { method: 'DELETE' });
             }
-            markDirty();
+            markDirty(); _updateUndoButtons();
             _loadSharedSceneDetail(presetId);
         }
 
