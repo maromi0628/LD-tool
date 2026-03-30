@@ -2730,10 +2730,12 @@
             _updateSelectionHighlight();
         }
 
+        let _preventNextClick = false;
+
         function progLineMousedown(event, actionId, triggerId) {
             if (event.button !== 0) return;
-            // Only skip form controls and drag handle; all text areas are selectable
-            if (event.target.closest('button, select, .prog-grip')) return;
+            // Only skip: form controls, drag handle, edit pencil, condition dropdowns
+            if (event.target.closest('button, select, .prog-grip, .prog-edit-hint, .prog-then-drop, .prog-cond-btn, .prog-connector')) return;
             if (event.shiftKey && _selectionAnchor !== null) {
                 _rangeSelectTo(actionId);
             } else if (event.ctrlKey || event.metaKey) {
@@ -2745,7 +2747,19 @@
                 _isMouseSelecting = true;
             }
             _updateSelectionHighlight();
+            _preventNextClick = true;
         }
+
+        // Block onclick handlers (e.g. editRunAction) from firing right after line selection
+        document.addEventListener('click', (e) => {
+            if (!_preventNextClick) return;
+            _preventNextClick = false;
+            const progLine = e.target.closest('.prog-line');
+            if (progLine && e.target.closest('.prog-action, .prog-keyword')) {
+                e.stopImmediatePropagation();
+                e.preventDefault();
+            }
+        }, true); // capturing phase — fires before element's own onclick
 
         function _rangeSelectTo(actionId) {
             const allLines = [...document.querySelectorAll('.prog-line[data-action-id]')];
