@@ -2732,7 +2732,8 @@
 
         function progLineMousedown(event, actionId, triggerId) {
             if (event.button !== 0) return;
-            if (event.target.closest('button, select, .prog-grip, .prog-action, .prog-edit-hint, .prog-then-drop, .prog-condition, .prog-connector')) return;
+            // Only skip form controls and drag handle; all text areas are selectable
+            if (event.target.closest('button, select, .prog-grip')) return;
             if (event.shiftKey && _selectionAnchor !== null) {
                 _rangeSelectTo(actionId);
             } else if (event.ctrlKey || event.metaKey) {
