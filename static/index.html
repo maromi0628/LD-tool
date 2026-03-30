@@ -3512,17 +3512,41 @@
             const tag = (e.target || {}).tagName || '';
             if (['INPUT', 'TEXTAREA', 'SELECT'].includes(tag)) return;
 
+            // Strategy 1: Use browser's native selection range to find prog-lines
+            const sel = window.getSelection();
+            if (sel && sel.rangeCount > 0 && !sel.isCollapsed) {
+                const range = sel.getRangeAt(0);
+                // Check if selection is inside a prog-actions area
+                const container = range.commonAncestorContainer;
+                const progArea = (container.nodeType === 1 ? container : container.parentElement)
+                    ?.closest?.('.prog-actions, .prog-detail, .prog-event-panel, #tab-programs');
+                if (progArea) {
+                    // Find all .prog-line elements that intersect with the selection
+                    const allLines = document.querySelectorAll('.prog-line');
+                    const selectedLines = [];
+                    allLines.forEach(line => {
+                        if (range.intersectsNode(line)) {
+                            selectedLines.push(line);
+                        }
+                    });
+                    if (selectedLines.length > 0) {
+                        const text = selectedLines.map(line => _extractLineText(line)).join('\n');
+                        e.clipboardData.setData('text/plain', text);
+                        e.preventDefault();
+                        showToast(`${selectedLines.length}行コピーしました`);
+                        return;
+                    }
+                }
+            }
+
+            // Strategy 2: Use app's internal selection (_selectedActionIds)
             if (_selectedActionIds.size > 0) {
                 const orderedIds = [...document.querySelectorAll('.prog-line[data-action-id]')]
                     .map(el => parseInt(el.dataset.actionId))
                     .filter(id => _selectedActionIds.has(id));
                 const actions = orderedIds.map(id => _findActionById(id)).filter(Boolean);
                 if (!actions.length) return;
-
-                // Sync internal clipboard
                 _actionClipboard = { actions, sourcePmId: null };
-
-                // Build text representation
                 const presetNames = window._currentPresetNames || {};
                 const text = actions.map(act => _actionToText(act, 0, presetNames)).join('\n');
                 e.clipboardData.setData('text/plain', text);
@@ -3530,6 +3554,39 @@
                 showToast(`${actions.length}件のアクションをコピーしました`);
             }
         });
+
+        // Extract clean readable text from a .prog-line DOM element
+        function _extractLineText(lineEl) {
+            const parts = [];
+            // Calculate indent from padding-left style
+            const padPx = parseInt(lineEl.style.paddingLeft) || 0;
+            const indent = '  '.repeat(Math.round(padPx / 16));
+
+            lineEl.childNodes.forEach(node => {
+                // Skip grip handles, buttons, edit hints
+                if (node.nodeType === 1) {
+                    const el = node;
+                    if (el.classList.contains('prog-grip')) return;
+                    if (el.classList.contains('prog-del-btn')) return;
+                    if (el.classList.contains('prog-add-inline')) return;
+                    if (el.classList.contains('prog-more-btn')) return;
+                    if (el.classList.contains('prog-edit-hint')) return;
+                    if (el.tagName === 'BUTTON') return;
+                    // For <select>, get the selected option text
+                    if (el.tagName === 'SELECT') {
+                        parts.push(el.options[el.selectedIndex]?.textContent?.trim() || '');
+                        return;
+                    }
+                    // For spans and other elements, get text content
+                    const txt = el.textContent?.trim();
+                    if (txt) parts.push(txt);
+                } else if (node.nodeType === 3) {
+                    const txt = node.textContent?.trim();
+                    if (txt) parts.push(txt);
+                }
+            });
+            return indent + parts.join(' ');
+        }
 
         function _actionToText(act, depth, presetNames) {
             const pad = '  '.repeat(depth);
