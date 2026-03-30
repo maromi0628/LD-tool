@@ -632,16 +632,7 @@
 
         .prog-actions .prog-line {
             padding: 1px 0;
-            user-select: text;
-            cursor: text;
-        }
-
-        /* Allow text selection to flow through all child elements */
-        .prog-actions .prog-line * {
-            user-select: text !important;
-        }
-        .prog-actions .prog-line .prog-grip {
-            user-select: none !important;
+            user-select: none;
         }
 
         .prog-actions .prog-keyword {
@@ -2741,36 +2732,18 @@
 
         function progLineMousedown(event, actionId, triggerId) {
             if (event.button !== 0) return;
-            const target = event.target;
-            const isGrip = !!target.closest('.prog-grip');
-            const isModifier = event.shiftKey || event.ctrlKey || event.metaKey;
-
-            // Don't intercept clicks on logic UI elements unless modifiers/grip are used
-            if (!isGrip && !isModifier && target.closest('button, select, .prog-action, .prog-edit-hint, .prog-then-drop, .prog-condition, .prog-connector')) return;
-
-            if (isGrip || isModifier) {
-                if (event.shiftKey && _selectionAnchor !== null) {
-                    _rangeSelectTo(actionId);
-                } else if (event.ctrlKey || event.metaKey) {
-                    if (_selectedActionIds.has(actionId)) _selectedActionIds.delete(actionId);
-                    else { _selectedActionIds.add(actionId); _selectionAnchor = actionId; }
-                    _isMouseSelecting = true;
-                } else {
-                    _selectedActionIds = new Set([actionId]);
-                    _selectionAnchor = actionId;
-                    _isMouseSelecting = true;
-                }
-                _updateSelectionHighlight();
+            if (event.target.closest('button, select, .prog-grip, .prog-action, .prog-edit-hint, .prog-then-drop, .prog-condition, .prog-connector')) return;
+            if (event.shiftKey && _selectionAnchor !== null) {
+                _rangeSelectTo(actionId);
+            } else if (event.ctrlKey || event.metaKey) {
+                if (_selectedActionIds.has(actionId)) _selectedActionIds.delete(actionId);
+                else { _selectedActionIds.add(actionId); _selectionAnchor = actionId; }
             } else {
-                // Standard drag (without modifiers) should do standard text selection
-                _isMouseSelecting = false;
-                // If it wasn't selected, clear highlights to minimize clutter during text selection
-                if (!_selectedActionIds.has(actionId)) {
-                    _selectedActionIds = new Set();
-                    _updateSelectionHighlight();
-                }
+                _selectedActionIds = new Set([actionId]);
                 _selectionAnchor = actionId;
+                _isMouseSelecting = true;
             }
+            _updateSelectionHighlight();
         }
 
         function _rangeSelectTo(actionId) {
@@ -3508,53 +3481,53 @@
                 e.preventDefault(); _undo();
             } else if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.shiftKey && e.key === 'z'))) {
                 e.preventDefault(); _redo();
+            } else if ((e.ctrlKey || e.metaKey) && e.key === 'c' && _selectedActionIds.size > 0) {
+                e.preventDefault();
+                _copySelectedLinesToClipboard();
             } else if (e.key === 'Delete' && _selectedActionIds.size === 1) {
                 e.preventDefault(); deleteAction([..._selectedActionIds][0]);
             } else if (e.key === 'Escape') {
+                _selectedActionIds = new Set();
+                _updateSelectionHighlight();
                 ['scene-picker-overlay', 'btn-copy-picker-overlay', 'delay-picker-overlay']
                     .forEach(id => document.getElementById(id)?.remove());
             }
         });
 
-        document.addEventListener('copy', (e) => {
-            const tag = (e.target || {}).tagName || '';
-            if (['INPUT', 'TEXTAREA'].includes(tag)) return;
+        async function _copySelectedLinesToClipboard() {
+            const orderedIds = [...document.querySelectorAll('.prog-line[data-action-id]')]
+                .map(el => parseInt(el.dataset.actionId))
+                .filter(id => _selectedActionIds.has(id));
+            const lines = orderedIds.map(id =>
+                document.querySelector(`.prog-line[data-action-id="${id}"]`)
+            ).filter(Boolean);
+            if (!lines.length) { showToast('コピー対象なし'); return; }
 
-            // Find all .prog-line elements that intersect with the browser selection
-            const sel = window.getSelection();
-            if (sel && sel.rangeCount > 0 && !sel.isCollapsed) {
-                const range = sel.getRangeAt(0);
-                const allLines = document.querySelectorAll('.prog-line');
-                const selectedLines = [];
-                allLines.forEach(line => {
-                    try {
-                        if (range.intersectsNode(line)) {
-                            selectedLines.push(line);
-                        }
-                    } catch(ex) {}
-                });
-                if (selectedLines.length > 0) {
-                    const text = selectedLines.map(line => _extractLineText(line)).join('\n');
-                    e.clipboardData.setData('text/plain', text);
-                    e.preventDefault();
-                    showToast(`${selectedLines.length}行コピーしました`);
-                    return;
-                }
+            const text = lines.map(line => _extractLineText(line)).join('\n');
+            try {
+                await navigator.clipboard.writeText(text);
+            } catch(ex) {
+                const ta = document.createElement('textarea');
+                ta.value = text;
+                ta.style.cssText = 'position:fixed;left:-9999px';
+                document.body.appendChild(ta);
+                ta.select();
+                document.execCommand('copy');
+                document.body.removeChild(ta);
             }
+            showToast(`${lines.length}行コピーしました`);
 
-            // Fallback: Use app's internal selection (_selectedActionIds)
-            if (_selectedActionIds.size > 0) {
-                const orderedIds = [...document.querySelectorAll('.prog-line[data-action-id]')]
-                    .map(el => parseInt(el.dataset.actionId))
-                    .filter(id => _selectedActionIds.has(id));
-                const actions = orderedIds.map(id => _findActionById(id)).filter(Boolean);
-                if (!actions.length) return;
+            // Sync internal clipboard too
+            const actions = orderedIds.map(id => _findActionById(id)).filter(Boolean);
+            if (actions.length) {
                 _actionClipboard = { actions, sourcePmId: null };
-                const presetNames = window._currentPresetNames || {};
-                const text = actions.map(act => _actionToText(act, 0, presetNames)).join('\n');
-                e.clipboardData.setData('text/plain', text);
+            }
+        }
+
+        document.addEventListener('copy', (e) => {
+            if (_selectedActionIds.size > 0) {
                 e.preventDefault();
-                showToast(`${actions.length}件のアクションをコピーしました`);
+                _copySelectedLinesToClipboard();
             }
         });
 
