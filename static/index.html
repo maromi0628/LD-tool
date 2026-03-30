@@ -636,6 +636,14 @@
             cursor: text;
         }
 
+        /* Allow text selection to flow through all child elements */
+        .prog-actions .prog-line * {
+            user-select: text !important;
+        }
+        .prog-actions .prog-line .prog-grip {
+            user-select: none !important;
+        }
+
         .prog-actions .prog-keyword {
             color: #c586c0;
             font-weight: 600;
@@ -3510,36 +3518,31 @@
 
         document.addEventListener('copy', (e) => {
             const tag = (e.target || {}).tagName || '';
-            if (['INPUT', 'TEXTAREA', 'SELECT'].includes(tag)) return;
+            if (['INPUT', 'TEXTAREA'].includes(tag)) return;
 
-            // Strategy 1: Use browser's native selection range to find prog-lines
+            // Find all .prog-line elements that intersect with the browser selection
             const sel = window.getSelection();
             if (sel && sel.rangeCount > 0 && !sel.isCollapsed) {
                 const range = sel.getRangeAt(0);
-                // Check if selection is inside a prog-actions area
-                const container = range.commonAncestorContainer;
-                const progArea = (container.nodeType === 1 ? container : container.parentElement)
-                    ?.closest?.('.prog-actions, .prog-detail, .prog-event-panel, #tab-programs');
-                if (progArea) {
-                    // Find all .prog-line elements that intersect with the selection
-                    const allLines = document.querySelectorAll('.prog-line');
-                    const selectedLines = [];
-                    allLines.forEach(line => {
+                const allLines = document.querySelectorAll('.prog-line');
+                const selectedLines = [];
+                allLines.forEach(line => {
+                    try {
                         if (range.intersectsNode(line)) {
                             selectedLines.push(line);
                         }
-                    });
-                    if (selectedLines.length > 0) {
-                        const text = selectedLines.map(line => _extractLineText(line)).join('\n');
-                        e.clipboardData.setData('text/plain', text);
-                        e.preventDefault();
-                        showToast(`${selectedLines.length}行コピーしました`);
-                        return;
-                    }
+                    } catch(ex) {}
+                });
+                if (selectedLines.length > 0) {
+                    const text = selectedLines.map(line => _extractLineText(line)).join('\n');
+                    e.clipboardData.setData('text/plain', text);
+                    e.preventDefault();
+                    showToast(`${selectedLines.length}行コピーしました`);
+                    return;
                 }
             }
 
-            // Strategy 2: Use app's internal selection (_selectedActionIds)
+            // Fallback: Use app's internal selection (_selectedActionIds)
             if (_selectedActionIds.size > 0) {
                 const orderedIds = [...document.querySelectorAll('.prog-line[data-action-id]')]
                     .map(el => parseInt(el.dataset.actionId))
