@@ -136,7 +136,7 @@
             gap: 6px;
             padding: 5px 10px;
             cursor: pointer;
-            user-select: none;
+            user-select: text;
             border-left: 3px solid transparent;
         }
 
@@ -413,7 +413,7 @@
             color: var(--text-dim);
             border-bottom: 2px solid transparent;
             margin-bottom: -1px;
-            user-select: none;
+            user-select: text;
         }
 
         .detail-tab:hover {
@@ -632,6 +632,7 @@
 
         .prog-actions .prog-line {
             padding: 1px 0;
+            user-select: text;
         }
 
         .prog-actions .prog-keyword {
@@ -669,10 +670,21 @@
         }
 
         .prog-line.prog-selected {
-            background: rgba(74, 144, 217, 0.18) !important;
-            outline: 1px solid rgba(74, 144, 217, 0.5);
+            background: rgba(74, 144, 217, 0.22) !important;
+            outline: 1px solid rgba(74, 144, 217, 0.55);
             border-radius: 3px;
         }
+        .prog-grip {
+            cursor: grab;
+            color: var(--text-dim);
+            padding: 0 4px 0 0;
+            font-size: 11px;
+            opacity: 0.35;
+            user-select: none;
+            flex-shrink: 0;
+        }
+        .prog-grip:hover { opacity: 0.75; }
+        .prog-grip:active { cursor: grabbing; }
 
         .prog-line-run:hover .prog-edit-hint {
             opacity: 1;
@@ -1206,7 +1218,7 @@
         .ssc-cat-label {
             min-width: 100px; max-width: 220px;
             overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-            cursor: pointer; user-select: none;
+            cursor: pointer; user-select: text;
         }
 
         .ssc-edit-btn {
@@ -2689,6 +2701,199 @@
 
         let _progButtons = [];
         let _progStations = [];
+        let _currentTrigTrees = {};
+
+        // ── Action multi-select & copy/paste ─────────────────
+        let _selectedActionIds = new Set();
+        let _selectionAnchor = null;
+        let _isMouseSelecting = false;
+        let _actionClipboard = null; // { actions: [], sourcePmId: number }
+
+        document.addEventListener('mouseup', () => { _isMouseSelecting = false; });
+
+        // Drag selection: use mousemove + elementFromPoint as fallback
+        document.addEventListener('mousemove', (e) => {
+            if (!_isMouseSelecting || _selectionAnchor === null) return;
+            if (!(e.buttons & 1)) { _isMouseSelecting = false; return; } // button released
+            const el = document.elementFromPoint(e.clientX, e.clientY);
+            if (!el) return;
+            const line = el.closest('.prog-line[data-action-id]');
+            if (!line) return;
+            const id = parseInt(line.dataset.actionId);
+            if (!isNaN(id)) { _rangeSelectTo(id); _updateSelectionHighlight(); }
+        });
+
+        // Also use mouseenter on prog-lines for reliable drag-selection detection
+        function progLineMouseenter(event, actionId) {
+            if (!_isMouseSelecting || _selectionAnchor === null) return;
+            if (!(event.buttons & 1)) { _isMouseSelecting = false; return; }
+            _rangeSelectTo(actionId);
+            _updateSelectionHighlight();
+        }
+
+        function progLineMousedown(event, actionId, triggerId) {
+            if (event.button !== 0) return;
+            if (event.target.closest('button, select, .prog-grip, .prog-action, .prog-edit-hint, .prog-then-drop')) return;
+            if (event.shiftKey && _selectionAnchor !== null) {
+                _rangeSelectTo(actionId);
+            } else if (event.ctrlKey || event.metaKey) {
+                if (_selectedActionIds.has(actionId)) _selectedActionIds.delete(actionId);
+                else { _selectedActionIds.add(actionId); _selectionAnchor = actionId; }
+            } else {
+                _selectedActionIds = new Set([actionId]);
+                _selectionAnchor = actionId;
+                _isMouseSelecting = true;
+            }
+            _updateSelectionHighlight();
+        }
+
+        function _rangeSelectTo(actionId) {
+            const allLines = [...document.querySelectorAll('.prog-line[data-action-id]')];
+            const ids = allLines.map(el => parseInt(el.dataset.actionId));
+            const a = ids.indexOf(_selectionAnchor), b = ids.indexOf(actionId);
+            if (a === -1 || b === -1) return;
+            const [lo, hi] = a < b ? [a, b] : [b, a];
+            _selectedActionIds = new Set(ids.slice(lo, hi + 1));
+        }
+
+        function _updateSelectionHighlight() {
+            document.querySelectorAll('.prog-line[data-action-id]').forEach(el => {
+                el.classList.toggle('prog-selected', _selectedActionIds.has(parseInt(el.dataset.actionId)));
+            });
+        }
+
+        function _findActionById(actionId, trees) {
+            // trigger_trees: { parent_id: [triggerObj, ...] }
+            // each triggerObj has { TriggerID, actions: [...] }
+            trees = trees || _currentTrigTrees;
+            for (const trigList of Object.values(trees)) {
+                for (const trig of (trigList || [])) {
+                    const found = _findInActionList(actionId, trig.actions || []);
+                    if (found) return found;
+                }
+            }
+            return null;
+        }
+
+        function _findInActionList(actionId, actions) {
+            for (const act of (actions || [])) {
+                if (act.ActionID === actionId) return act;
+                for (const st of (act.sub_triggers || [])) {
+                    const found = _findInActionList(actionId, st.actions);
+                    if (found) return found;
+                }
+            }
+            return null;
+        }
+
+        function copySelectedActions(pmId) {
+            const orderedIds = [...document.querySelectorAll('.prog-line[data-action-id]')]
+                .map(el => parseInt(el.dataset.actionId))
+                .filter(id => _selectedActionIds.has(id));
+            const actions = orderedIds.map(id => _findActionById(id)).filter(Boolean);
+            if (!actions.length) { toast('コピー対象なし'); return; }
+            _actionClipboard = { actions, sourcePmId: pmId };
+            toast(`${actions.length}件コピーしました`);
+        }
+
+        async function pasteActionsAt(triggerId, targetPmId, afterActionId, thenTriggerId, firstThenActionId) {
+            if (!_actionClipboard) return;
+            const actualTid = thenTriggerId || triggerId;
+            const body = {
+                actions: _actionClipboard.actions,
+                source_pm_id: _actionClipboard.sourcePmId,
+                target_pm_id: targetPmId,
+            };
+            if (thenTriggerId) {
+                if (firstThenActionId != null) body.insert_before_action_id = firstThenActionId;
+            } else if (afterActionId != null) {
+                body.insert_after_action_id = afterActionId;
+            }
+            const res = await fetch(`/api/trigger/${actualTid}/paste-actions`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+            const d = await res.json();
+            if (!res.ok || d.error) { toast('エラー: ' + (d.error || `HTTP ${res.status}`), 'red'); return; }
+            await reloadPrograms();
+            toast('貼り付けました');
+        }
+
+        function showAddBtnMenu(event, triggerId, pmId) {
+            event.stopPropagation();
+            document.querySelectorAll('.add-action-menu').forEach(m => m.remove());
+            if (!_actionClipboard) return;
+            const menu = document.createElement('div');
+            menu.className = 'add-action-menu';
+            const el = document.createElement('div');
+            el.textContent = `📌 貼り付け (${_actionClipboard.actions.length}件)`;
+            el.onclick = () => { menu.remove(); pasteActionsAt(triggerId, pmId, null, null, null); };
+            menu.appendChild(el);
+            const ex = Math.min(event.clientX, window.innerWidth - 200);
+            const ey = Math.min(event.clientY, window.innerHeight - 60);
+            menu.style.cssText = `top:${ey}px;left:${ex}px`;
+            document.body.appendChild(menu);
+            setTimeout(() => document.addEventListener('click', () => menu.remove(), { once: true }), 0);
+        }
+
+        function showProgLineMenu(event, triggerId, actionId, pmId, thenTriggerId=null, firstThenActionId=null) {
+            event.stopPropagation();
+            document.querySelectorAll('.add-action-menu').forEach(m => m.remove());
+            // If nothing selected, auto-select the right-clicked action.
+            // If something is already selected, preserve it (user may have drag-selected multiple).
+            if (_selectedActionIds.size === 0) {
+                _selectedActionIds = new Set([actionId]);
+                _selectionAnchor = actionId;
+                _updateSelectionHighlight();
+            }
+            const menu = document.createElement('div');
+            menu.className = 'add-action-menu';
+            const sep = () => { const el = document.createElement('div'); el.style.cssText = 'height:1px;background:rgba(255,255,255,0.1);margin:2px 0;pointer-events:none'; return el; };
+            const item = (label, fn, style) => { const el = document.createElement('div'); el.textContent = label; if (style) el.style.cssText = style; el.onclick = () => { menu.remove(); fn(); }; return el; };
+            const head = (label) => { const el = document.createElement('div'); el.textContent = label; el.style.cssText = 'padding:3px 12px 1px;font-size:9px;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.6px;pointer-events:none'; return el; };
+
+            // Copy / paste section
+            menu.append(
+                item(`📋 コピー (${_selectedActionIds.size}件)`, () => copySelectedActions(pmId)),
+            );
+            if (_actionClipboard) {
+                menu.append(
+                    item(`📌 ここに貼り付け (${_actionClipboard.actions.length}件)`,
+                        () => pasteActionsAt(triggerId, pmId, actionId, thenTriggerId, firstThenActionId)),
+                );
+            }
+            menu.append(sep());
+
+            // Insert section (same as showInsertMenu)
+            const downRunFn = thenTriggerId
+                ? () => doAddRun(thenTriggerId, pmId, null, null, firstThenActionId)
+                : () => doAddRun(triggerId, pmId, null, actionId, null);
+            const downDelayFn = thenTriggerId
+                ? () => doAddDelay(thenTriggerId, null, null, null, firstThenActionId)
+                : () => doAddDelay(triggerId, null, null, actionId, null);
+            const downIfFn = thenTriggerId
+                ? () => doAddIf(thenTriggerId, pmId, null, null, firstThenActionId)
+                : () => doAddIf(triggerId, pmId, null, actionId, null);
+            menu.append(
+                head('前に挿入'),
+                item('▲ Run', () => doAddRun(triggerId, pmId, null, null, actionId)),
+                item('▲ Delay', () => doAddDelay(triggerId, null, null, null, actionId)),
+                item('▲ If', () => doAddIf(triggerId, pmId, null, null, actionId)),
+                sep(),
+                head('後に挿入'),
+                item('▼ Run', downRunFn),
+                item('▼ Delay', downDelayFn),
+                item('▼ If', downIfFn),
+                sep(),
+                item('⬛ If で包む (Wrap in If)', () => doWrapInIf(actionId), 'color:var(--teal)'),
+            );
+
+            const ex = Math.min(event.clientX, window.innerWidth - 200);
+            const ey = Math.min(event.clientY, window.innerHeight - 380);
+            menu.style.cssText = `top:${ey}px;left:${ex}px`;
+            document.body.appendChild(menu);
+            setTimeout(() => document.addEventListener('click', () => menu.remove(), { once: true }), 0);
+        }
 
         function renderProgramsTab(prog) {
             if (!prog || !prog.stations || !prog.stations.length) {
@@ -2710,6 +2915,7 @@
             const pmDetails = prog.pm_details || {};
             const presetNames = prog.preset_names || {};
             const trigTrees = prog.trigger_trees || {};
+            _currentTrigTrees = trigTrees;
 
             let html = `<div style="padding:4px 12px;font-size:10px;color:var(--text-dim);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px">
     <span style="margin-left:auto"></span>
@@ -3016,8 +3222,11 @@
 
         function renderAddBtn(triggerId, pmId, triggerType, depth) {
             const pad = depth * 16;
+            const pasteCtx = triggerId
+                ? ` oncontextmenu="event.preventDefault();event.stopPropagation();showAddBtnMenu(event,${triggerId},${pmId || 'null'})"`
+                : '';
             if (triggerId) {
-                return `<button class="prog-add-btn" style="margin-left:${pad}px"
+                return `<button class="prog-add-btn" style="margin-left:${pad}px"${pasteCtx}
       onclick="showAddMenu(event,${triggerId},${pmId || 'null'})">+ 追加</button>`;
             } else if (pmId && triggerType) {
                 // No trigger yet — need to create one first
@@ -3037,26 +3246,35 @@
                     ? `<button class="prog-del-btn" onclick="event.stopPropagation();deleteAction(${act.ActionID})" title="削除">✕</button>`
                     : '';
                 const _pmIdInline = pm ? pm.ProgrammingModelID : null;
-                const ctxMenu = act.ActionID && parentTriggerId
-                    ? ` oncontextmenu="event.preventDefault();event.stopPropagation();showInsertMenu(event,${parentTriggerId},${act.ActionID},${_pmIdInline || 'null'})"`
-                    : '';
                 const addInlineBtn = act.ActionID && parentTriggerId
                     ? `<button class="prog-add-inline" onclick="event.stopPropagation();showAddMenu(event,${parentTriggerId},${_pmIdInline || 'null'},null,${act.ActionID})" title="この下に追加">＋</button>`
                     : '';
                 const moreBtn = act.ActionID && parentTriggerId
                     ? `<button class="prog-more-btn" onclick="event.stopPropagation();showInsertMenu(event,${parentTriggerId},${act.ActionID},${_pmIdInline || 'null'})" title="前後に追加 / Wrap">⋮</button>`
                     : '';
-                const dragAttrs = act.ActionID && parentTriggerId
-                    ? ` draggable="true" data-action-id="${act.ActionID}" data-trigger-id="${parentTriggerId}" ondragstart="actionDragStart(event,this)" ondragover="actionDragOver(event,this)" ondragleave="actionDragLeave(event,this)" ondrop="actionDrop(event,this)" ondragend="actionDragEnd(event,this)"`
+                // data-* stay on prog-line for drop targets; drag moved to grip handle
+                const dataAttrs = act.ActionID && parentTriggerId
+                    ? ` data-action-id="${act.ActionID}" data-trigger-id="${parentTriggerId}" ondragstart="if(!event.target.closest('.prog-grip'))event.preventDefault()" ondragover="actionDragOver(event,this)" ondragleave="actionDragLeave(event,this)" ondrop="actionDrop(event,this)"`
                     : '';
-                const selectAttr = act.ActionID ? ` onclick="selectProgLine(${act.ActionID},event)"` : '';
+                // Grip handle — only this is draggable for reordering
+                const gripSpan = act.ActionID && parentTriggerId
+                    ? `<span class="prog-grip" draggable="true" ondragstart="actionDragStart(event,this.closest('.prog-line'))" ondragend="actionDragEnd(event,this.closest('.prog-line'))" title="ドラッグで並び替え">⠿</span>`
+                    : '';
+                // Mouse events for multi-select (mousedown starts selection, enter extends it)
+                const mouseAttrs = act.ActionID
+                    ? ` onmousedown="progLineMousedown(event,${act.ActionID},${parentTriggerId || 'null'})" onmouseenter="progLineMouseenter(event,${act.ActionID})"`
+                    : '';
+                // Right-click shows unified insert+copy/paste menu
+                const ctxMenu = act.ActionID && parentTriggerId
+                    ? ` oncontextmenu="event.preventDefault();event.stopPropagation();showProgLineMenu(event,${parentTriggerId},${act.ActionID},${_pmIdInline || 'null'})"`
+                    : '';
 
                 if (act.ObjectType === 235) {
                     // Delay
                     const secs = act.DelayTime || 0;
                     const h = Math.floor(secs / 3600), m = Math.floor((secs % 3600) / 60), s = secs % 60;
-                    html += `<div class="prog-line" style="padding-left:${pad}px"${ctxMenu}${dragAttrs}${selectAttr}>
-        <span class="prog-keyword">Delay</span> <span style="color:var(--text-dim)">${h}h ${m}m ${s}s</span>${moreBtn}${addInlineBtn}${delBtn}</div>`;
+                    html += `<div class="prog-line" style="padding-left:${pad}px"${ctxMenu}${dataAttrs}${mouseAttrs}>
+        ${gripSpan}<span class="prog-keyword">Delay</span> <span style="color:var(--text-dim)">${h}h ${m}m ${s}s</span>${moreBtn}${addInlineBtn}${delBtn}</div>`;
 
                 } else if (act.ObjectType === 233) {
                     // Conditional If/Then/Else/End If
@@ -3066,25 +3284,22 @@
                     const evals = act.evaluations || [];
                     const condDisplay = renderConditionsHtml(evals, presetNames, pm, act.ActionID);
                     const thenDrop = `<span class="prog-keyword prog-then-drop" onclick="event.stopPropagation();showAddConditionMenu(event,${act.ActionID})" title="条件を追加">Then ▾</span>`;
-                    // For If actions: ▼ should insert into the Then branch, not after End If
                     const thenTrigId = thenBranch[0]?.TriggerID || null;
                     const firstThenActId = thenBranch[0]?.actions?.[0]?.ActionID || null;
                     const ifCtxMenu = act.ActionID && parentTriggerId
-                        ? ` oncontextmenu="event.preventDefault();event.stopPropagation();showInsertMenu(event,${parentTriggerId},${act.ActionID},${_pmIdInline || 'null'},${thenTrigId || 'null'},${firstThenActId || 'null'})"`
+                        ? ` oncontextmenu="event.preventDefault();event.stopPropagation();showProgLineMenu(event,${parentTriggerId},${act.ActionID},${_pmIdInline || 'null'},${thenTrigId || 'null'},${firstThenActId || 'null'})"`
                         : '';
                     const ifMoreBtn = act.ActionID && parentTriggerId
                         ? `<button class="prog-more-btn" onclick="event.stopPropagation();showInsertMenu(event,${parentTriggerId},${act.ActionID},${_pmIdInline || 'null'},${thenTrigId || 'null'},${firstThenActId || 'null'})" title="前後に追加 / Wrap">⋮</button>`
                         : '';
-                    html += `<div class="prog-line" style="padding-left:${pad}px"${ifCtxMenu}${dragAttrs}${selectAttr}>
-        <span class="prog-keyword">If</span> ${condDisplay} ${thenDrop}${ifMoreBtn}${addInlineBtn}${delBtn}</div>`;
+                    html += `<div class="prog-line" style="padding-left:${pad}px"${ifCtxMenu}${dataAttrs}${mouseAttrs}>
+        ${gripSpan}<span class="prog-keyword">If</span> ${condDisplay} ${thenDrop}${ifMoreBtn}${addInlineBtn}${delBtn}</div>`;
 
-                    // Then branch
                     thenBranch.forEach(st => {
                         html += renderActionList(st.actions, presetNames, depth + 1, pm, st.TriggerID);
                         html += renderAddBtn(st.TriggerID, pm ? pm.ProgrammingModelID : null, null, depth + 1);
                     });
 
-                    // Else branch
                     if (elseBranch.length) {
                         html += `<div class="prog-line" style="padding-left:${pad}px"><span class="prog-keyword">Else</span></div>`;
                         elseBranch.forEach(st => {
@@ -3112,14 +3327,14 @@
             onchange="changeExecutionType(${act.ActionID},parseInt(this.value))">${execOpts}</select>`
                         : `<span style="color:var(--text-dim)">${EXEC_LABELS[execType] || 'Run'} </span>`;
                     if (act.ActionID) {
-                        html += `<div class="prog-line prog-line-run" style="padding-left:${pad}px"${ctxMenu}${dragAttrs}${selectAttr}>
-          ${execSel}
+                        html += `<div class="prog-line prog-line-run" style="padding-left:${pad}px"${ctxMenu}${dataAttrs}${mouseAttrs}>
+          ${gripSpan}${execSel}
           <span class="prog-action" onclick="event.stopPropagation();editRunAction(${act.ActionID},${act.PresetId ?? 'null'},${pmId ?? 'null'})">${label}</span>
           <span class="prog-edit-hint" onclick="event.stopPropagation();editRunAction(${act.ActionID},${act.PresetId ?? 'null'},${pmId ?? 'null'})">✎</span>
           ${moreBtn}${addInlineBtn}${delBtn}
         </div>`;
                     } else {
-                        html += `<div class="prog-line" style="padding-left:${pad}px"${ctxMenu}${dragAttrs}>
+                        html += `<div class="prog-line" style="padding-left:${pad}px"${ctxMenu}${dataAttrs}>
           <span style="color:var(--text-dim)">${EXEC_LABELS[execType] || 'Run'} </span><span class="prog-action">${label}</span>${addInlineBtn}${delBtn}</div>`;
                     }
                 }
@@ -3266,8 +3481,8 @@
                 e.preventDefault(); _undo();
             } else if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.shiftKey && e.key === 'z'))) {
                 e.preventDefault(); _redo();
-            } else if (e.key === 'Delete' && _selectedActionId) {
-                e.preventDefault(); deleteAction(_selectedActionId);
+            } else if (e.key === 'Delete' && _selectedActionIds.size === 1) {
+                e.preventDefault(); deleteAction([..._selectedActionIds][0]);
             } else if (e.key === 'Escape') {
                 ['scene-picker-overlay', 'btn-copy-picker-overlay', 'delay-picker-overlay']
                     .forEach(id => document.getElementById(id)?.remove());
