@@ -2195,9 +2195,11 @@ def area_programs(area_id):
     buttons = q(f"""
         SELECT kb.ButtonID, kb.ButtonNumber, kb.Name as ButtonName,
                kb.ParentDeviceID, kb.ProgrammingModelID,
-               pm.Name as ProgModel, pm.ControlType as ProgControlType
+               pm.Name as ProgModel, pm.ControlType as ProgControlType,
+               abd.engraving_text as EngravingText
         FROM tblKeypadButton kb
         LEFT JOIN tblProgrammingModel pm ON kb.ProgrammingModelID = pm.ProgrammingModelID
+        LEFT JOIN AllButtonsDefinition abd ON abd.button_id = kb.ButtonID
         WHERE kb.ParentDeviceID IN ({ph})
         ORDER BY kb.ParentDeviceID, kb.ButtonNumber
     """, station_ids)
@@ -2414,6 +2416,95 @@ def debug_area(area_id):
 
 
 # ── Program structure helpers ─────────────────
+
+def _copy_local_preset(src_preset_id, tgt_pm_id):
+    """Copy a local preset (PresetType=1) to a new PM. Returns new preset ID."""
+    src = _try_q("SELECT * FROM tblPreset WHERE PresetID = ?", (src_preset_id,))
+    if not src or src[0].get("__error__"):
+        return None
+    # Copy all columns from source, overriding identity/parent fields
+    row = {k: v for k, v in src[0].items() if not k.startswith("__") and k != "PresetID"}
+    row["ParentType"] = 231
+    row["ParentID"] = tgt_pm_id
+    row["DatabaseRevision"] = 0
+    row["NeedsTransfer"] = 1
+    new_pid = _alloc_and_insert("tblPreset", "PresetID", row)
+    assignments = _try_q("SELECT * FROM tblPresetAssignment WHERE ParentID = ?", (src_preset_id,))
+    if assignments and not assignments[0].get("__error__"):
+        for assn in assignments:
+            assn_row = {k: v for k, v in assn.items()
+                        if not k.startswith("__") and k != "PresetAssignmentID"}
+            assn_row["ParentID"] = new_pid
+            assn_row["DatabaseRevision"] = 0
+            assn_row["NeedsTransfer"] = 1
+            new_aid = _alloc_and_insert("tblPresetAssignment", "PresetAssignmentID", assn_row)
+            params = _try_q("SELECT ParameterType, ParameterValue FROM tblAssignmentCommandParameter WHERE ParentId = ?",
+                            (assn["PresetAssignmentID"],))
+            if params and not params[0].get("__error__"):
+                for p in params:
+                    execute_sql("INSERT INTO tblAssignmentCommandParameter (SortOrder,ParentId,ParameterType,ParameterValue) VALUES (0,?,?,?)",
+                                (new_aid, p["ParameterType"], p["ParameterValue"]))
+    return new_pid
+
+
+def _copy_actions_recursive(src_trig_id, dst_trig_id, preset_id_map):
+    """Copy all actions from src trigger to dst trigger recursively (handles If/Then/Else)."""
+    action_rows = _try_q(
+        "SELECT ActionID, ObjectType, SortOrder, DelayTime, ExecutionType, PresetId, WhereUsedId "
+        "FROM tblAction WHERE ParentID = ? AND ParentType = 232 ORDER BY SortOrder",
+        (src_trig_id,)
+    )
+    if not action_rows or action_rows[0].get("__error__"):
+        return
+    for act in action_rows:
+        src_preset = act.get("PresetId") or 0
+        dst_preset = preset_id_map.get(src_preset, src_preset) if src_preset else 0
+        new_action_id = _alloc_and_insert("tblAction", "ActionID", {
+            "ObjectType": act["ObjectType"], "DatabaseRevision": 0,
+            "ParentID": dst_trig_id, "ParentType": 232,
+            "SortOrder": act["SortOrder"], "DelayTime": act.get("DelayTime") or 0,
+            "ExecutionType": act.get("ExecutionType") or 0,
+            "PresetId": dst_preset, "WhereUsedId": 2147483647,
+        })
+        if act["ObjectType"] == 233:  # If action — copy evaluations + sub-triggers
+            eval_rows = _try_q(
+                "SELECT ObjectType, SortOrder, EvaluationOperator, FirstOperandObjectID, "
+                "FirstOperandObjectType, FirstOperandRefProperty, SecondOperand, "
+                "ConditionType, ThirdOperand "
+                "FROM tblEvaluation WHERE ParentID = ? AND ParentType = 233",
+                (act["ActionID"],)
+            )
+            if eval_rows and not eval_rows[0].get("__error__"):
+                for ev in eval_rows:
+                    _alloc_and_insert("tblEvaluation", "EvaluationID", {
+                        "ObjectType": ev.get("ObjectType", 237), "DatabaseRevision": 0,
+                        "ParentID": new_action_id, "ParentType": 233,
+                        "SortOrder": ev.get("SortOrder", 0),
+                        "EvaluationOperator": ev.get("EvaluationOperator", 3),
+                        "FirstOperandObjectID": ev.get("FirstOperandObjectID", 0),
+                        "FirstOperandObjectType": ev.get("FirstOperandObjectType", 0),
+                        "FirstOperandRefProperty": ev.get("FirstOperandRefProperty", 0),
+                        "SecondOperand": ev.get("SecondOperand", 0),
+                        "ConditionType": ev.get("ConditionType", 23),
+                        "ThirdOperand": ev.get("ThirdOperand", 0),
+                        "WhereUsedId": 2147483647,
+                    })
+            sub_trig_rows = _try_q(
+                "SELECT TriggerID, ObjectType, SortOrder, TriggerType, ParentType "
+                "FROM tblTrigger WHERE ParentId = ? ORDER BY SortOrder",
+                (act["ActionID"],)
+            )
+            if sub_trig_rows and not sub_trig_rows[0].get("__error__"):
+                for st in sub_trig_rows:
+                    new_st_id = _alloc_and_insert("tblTrigger", "TriggerID", {
+                        "ObjectType": st.get("ObjectType", 232),
+                        "ParentId": new_action_id,
+                        "ParentType": st.get("ParentType", 233),
+                        "DatabaseRevision": 0, "SortOrder": st.get("SortOrder", 0),
+                        "TriggerType": st["TriggerType"], "WhereUsedId": 2147483647,
+                    })
+                    _copy_actions_recursive(st["TriggerID"], new_st_id, preset_id_map)
+
 
 def _next_sort_order_action(trigger_id):
     rows = _try_q("SELECT COALESCE(MAX(SortOrder)+1, 0) AS nxt FROM tblAction WHERE ParentID = ?", (trigger_id,))
@@ -2661,10 +2752,185 @@ def delete_action_endpoint(action_id):
     if not state["db_name"]:
         return jsonify({"error": "DB未接続"}), 400
     try:
+        # Capture row before deletion so Run/Delay can be undone
+        act_rows = _try_q(
+            "SELECT ActionID, ObjectType, DatabaseRevision, ParentID, ParentType, "
+            "SortOrder, DelayTime, ExecutionType, PresetId, WhereUsedId "
+            "FROM tblAction WHERE ActionID = ?", (action_id,)
+        )
         _delete_action_recursive(action_id)
+        if act_rows and not act_rows[0].get("__error__"):
+            act = act_rows[0]
+            obj_type = act.get("ObjectType")
+            if obj_type in (234, 235):  # Run or Delay — simple single-row undo
+                label = "Runアクション削除" if obj_type == 234 else "Delayアクション削除"
+                push_undo(
+                    [("INSERT INTO tblAction (ActionID, ObjectType, DatabaseRevision, ParentID, "
+                      "ParentType, SortOrder, DelayTime, ExecutionType, PresetId, WhereUsedId) "
+                      "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                      (act["ActionID"], act["ObjectType"], act["DatabaseRevision"],
+                       act["ParentID"], act["ParentType"], act["SortOrder"],
+                       act["DelayTime"], act["ExecutionType"], act["PresetId"], act["WhereUsedId"]))],
+                    [("DELETE FROM tblAction WHERE ActionID = ?", (action_id,))],
+                    label
+                )
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/button/<int:src_btn_id>/copy-to/<int:tgt_btn_id>", methods=["POST"])
+def copy_button_program(src_btn_id, tgt_btn_id):
+    """Copy all programming from source button to target button."""
+    if not state["db_name"]:
+        return jsonify({"error": "DB未接続"}), 400
+    if src_btn_id == tgt_btn_id:
+        return jsonify({"error": "コピー元とコピー先が同じです"}), 400
+    try:
+        src_btn = _try_q("SELECT ProgrammingModelID FROM tblKeypadButton WHERE ButtonID = ?", (src_btn_id,))
+        tgt_btn = _try_q("SELECT ProgrammingModelID FROM tblKeypadButton WHERE ButtonID = ?", (tgt_btn_id,))
+        if not src_btn or src_btn[0].get("__error__") or not src_btn[0].get("ProgrammingModelID"):
+            return jsonify({"error": "コピー元ボタンが見つかりません"}), 404
+        if not tgt_btn or tgt_btn[0].get("__error__") or not tgt_btn[0].get("ProgrammingModelID"):
+            return jsonify({"error": "コピー先ボタンが見つかりません"}), 404
+        src_pm_id = src_btn[0]["ProgrammingModelID"]
+        tgt_pm_id = tgt_btn[0]["ProgrammingModelID"]
+
+        src_pm = _try_q("SELECT * FROM tblProgrammingModel WHERE ProgrammingModelID = ?", (src_pm_id,))
+        if not src_pm or src_pm[0].get("__error__"):
+            return jsonify({"error": "コピー元PMが見つかりません"}), 404
+        src_pm = src_pm[0]
+
+        # --- Clear target PM's existing content ---
+        tgt_trigs = _try_q("SELECT TriggerID FROM tblTrigger WHERE ParentId = ? AND ParentType = 231", (tgt_pm_id,))
+        if tgt_trigs and not tgt_trigs[0].get("__error__"):
+            for t in tgt_trigs:
+                _delete_trigger_recursive(t["TriggerID"])
+        tgt_presets = _try_q("SELECT PresetID FROM tblPreset WHERE ParentType = 231 AND ParentID = ?", (tgt_pm_id,))
+        if tgt_presets and not tgt_presets[0].get("__error__"):
+            for p in tgt_presets:
+                assns = _try_q("SELECT PresetAssignmentID FROM tblPresetAssignment WHERE ParentID = ?", (p["PresetID"],))
+                if assns and not assns[0].get("__error__"):
+                    for a in assns:
+                        execute_sql("DELETE FROM tblAssignmentCommandParameter WHERE ParentId = ?", (a["PresetAssignmentID"],))
+                        execute_sql("DELETE FROM tblPresetAssignment WHERE PresetAssignmentID = ?", (a["PresetAssignmentID"],))
+                execute_sql("DELETE FROM tblPreset WHERE PresetID = ?", (p["PresetID"],))
+        # Clear PM preset references (use 0, not NULL, to avoid NOT NULL constraint violations)
+        execute_sql(
+            "UPDATE tblProgrammingModel SET PressPresetID=0, ReleasePresetID=0, "
+            "HoldPresetId=0, DoubleTapPresetID=0, OnPresetID=0, OffPresetID=0 "
+            "WHERE ProgrammingModelID = ?", (tgt_pm_id,)
+        )
+
+        # --- Copy local presets, building ID remap ---
+        preset_id_map = {}
+        src_local = _try_q("SELECT PresetID FROM tblPreset WHERE ParentType = 231 AND ParentID = ?", (src_pm_id,))
+        if src_local and not src_local[0].get("__error__"):
+            for p in src_local:
+                new_pid = _copy_local_preset(p["PresetID"], tgt_pm_id)
+                if new_pid:
+                    preset_id_map[p["PresetID"]] = new_pid
+
+        # --- Copy triggers and their actions ---
+        src_trigs = _try_q(
+            "SELECT TriggerID, ObjectType, SortOrder, TriggerType, ParentType "
+            "FROM tblTrigger WHERE ParentId = ? AND ParentType = 231 ORDER BY SortOrder",
+            (src_pm_id,)
+        )
+        if src_trigs and not src_trigs[0].get("__error__"):
+            for trig in src_trigs:
+                new_trig_id = _alloc_and_insert("tblTrigger", "TriggerID", {
+                    "ObjectType": trig.get("ObjectType", 232), "ParentId": tgt_pm_id,
+                    "ParentType": 231, "DatabaseRevision": 0,
+                    "SortOrder": trig.get("SortOrder", 0), "TriggerType": trig["TriggerType"],
+                    "WhereUsedId": 2147483647,
+                })
+                _copy_actions_recursive(trig["TriggerID"], new_trig_id, preset_id_map)
+
+        # --- Copy PM preset references (remapping local preset IDs) ---
+        preset_fields = ["PressPresetID", "ReleasePresetID", "HoldPresetId",
+                         "DoubleTapPresetID", "OnPresetID", "OffPresetID"]
+        other_fields  = ["LedLogic", "UseReverseLedLogic", "AllowDoubleTap",
+                         "HoldTime", "HeldButtonAction", "ReferencePresetIDForLed"]
+        update = {}
+        for f in other_fields:
+            if src_pm.get(f) is not None:
+                update[f] = src_pm[f]
+        for f in preset_fields:
+            v = src_pm.get(f)
+            if v:
+                update[f] = preset_id_map.get(v, v)
+        if update:
+            set_sql = ", ".join(f"{k} = ?" for k in update)
+            execute_sql(f"UPDATE tblProgrammingModel SET {set_sql} WHERE ProgrammingModelID = ?",
+                        tuple(update.values()) + (tgt_pm_id,))
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/button/<int:button_id>/debug-schema")
+def button_debug_schema(button_id):
+    """Return all columns of tblKeypadButton + related name tables for debugging."""
+    if not state["db_name"]:
+        return jsonify({"error": "DB未接続"}), 400
+    result = {}
+    # Full tblKeypadButton row
+    rows = _try_q("SELECT * FROM tblKeypadButton WHERE ButtonID = ?", (button_id,))
+    if rows and not rows[0].get("__error__"):
+        result["tblKeypadButton"] = {k: v for k, v in rows[0].items() if not k.startswith("__")}
+    else:
+        return jsonify({"error": "ボタンが見つかりません"}), 404
+
+    btn = result["tblKeypadButton"]
+
+    # Look for name in tblComponent (Lutron stores component names here)
+    for tbl in ["tblComponent", "tblObject", "tblEntity"]:
+        r = _try_q(f"SELECT * FROM {tbl} WHERE ObjectID = ?", (button_id,))
+        if r and not r[0].get("__error__"):
+            result[tbl] = {k: v for k, v in r[0].items() if not k.startswith("__")}
+
+    # Look for button name tables
+    name_tables = _try_q("""
+        SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES
+        WHERE TABLE_NAME LIKE '%Button%' OR TABLE_NAME LIKE '%Keypad%'
+           OR TABLE_NAME LIKE '%Engraving%' OR TABLE_NAME LIKE '%Label%'
+           OR TABLE_NAME LIKE '%ButtonName%'
+        ORDER BY TABLE_NAME
+    """)
+    result["related_tables"] = [r["TABLE_NAME"] for r in (name_tables or []) if not r.get("__error__")]
+
+    pm_id = btn.get("ProgrammingModelID")
+
+    parent_dev_id = btn.get("ParentDeviceID")
+
+    # tblEngravingPosition: try all likely key columns
+    for col, val in [("ParentDeviceID", button_id), ("ParentDeviceID", parent_dev_id),
+                     ("EngravingPositionID", button_id)]:
+        if not val:
+            continue
+        r = _try_q(f"SELECT * FROM tblEngravingPosition WHERE {col} = ?", (val,))
+        if r and not r[0].get("__error__"):
+            result[f"tblEngravingPosition_by_{col}_{val}"] = [
+                {k: v for k, v in row.items() if not k.startswith("__")} for row in r]
+
+    # AllButtonsDefinition: try all likely key columns
+    for col, val in [("button_id", button_id), ("programming_model_id", pm_id),
+                     ("device_id", button_id), ("device_id", parent_dev_id)]:
+        if not val:
+            continue
+        r = _try_q(f"SELECT * FROM AllButtonsDefinition WHERE {col} = ?", (val,))
+        if r and not r[0].get("__error__"):
+            result[f"AllButtonsDefinition_by_{col}_{val}"] = [
+                {k: v for k, v in row.items() if not k.startswith("__")} for row in r]
+
+    # Sample rows so we can see real values
+    for tbl in ["tblEngravingPosition", "AllButtonsDefinition"]:
+        r = _try_q(f"SELECT TOP 3 * FROM {tbl}")
+        if r and not r[0].get("__error__"):
+            result[f"{tbl}_sample"] = [{k: v for k, v in row.items() if not k.startswith("__")} for row in r]
+
+    return jsonify(result)
 
 
 @app.route("/api/pm/<int:pm_id>/add-trigger", methods=["POST"])

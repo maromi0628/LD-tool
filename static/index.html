@@ -668,6 +668,12 @@
             background: rgba(74, 144, 217, 0.12);
         }
 
+        .prog-line.prog-selected {
+            background: rgba(74, 144, 217, 0.18) !important;
+            outline: 1px solid rgba(74, 144, 217, 0.5);
+            border-radius: 3px;
+        }
+
         .prog-line-run:hover .prog-edit-hint {
             opacity: 1;
         }
@@ -818,34 +824,6 @@
         .prog-line:hover .prog-more-btn,
         .prog-line-run:hover .prog-more-btn { opacity: 0.7; }
         .prog-more-btn:hover { opacity: 1 !important; color: var(--accent) !important; }
-
-        /* Insert-point divider between actions */
-        .prog-insert-pt {
-            display: flex;
-            align-items: center;
-            gap: 4px;
-            height: 14px;
-            cursor: pointer;
-            opacity: 0;
-            transition: opacity 0.15s;
-        }
-        .prog-insert-pt:hover { opacity: 1; }
-        .prog-insert-pt::before {
-            content: '＋';
-            font-size: 9px;
-            color: var(--accent);
-            white-space: nowrap;
-        }
-        .prog-insert-pt::after {
-            content: '';
-            flex: 1;
-            height: 1px;
-            background: var(--accent);
-            opacity: 0.4;
-        }
-        /* Always show insert point when parent hovered */
-        .prog-actions:hover .prog-insert-pt { opacity: 0.35; }
-        .prog-actions:hover .prog-insert-pt:hover { opacity: 1; }
 
         /* AND/OR condition connector */
         .prog-connector {
@@ -2709,10 +2687,15 @@
             return p.name || `Scene ${p.number ?? presetId}`;
         }
 
+        let _progButtons = [];
+        let _progStations = [];
+
         function renderProgramsTab(prog) {
             if (!prog || !prog.stations || !prog.stations.length) {
                 return '<div class="prog-no-data" style="padding:16px">キーパッドなし</div>';
             }
+            _progButtons = prog.buttons || [];
+            _progStations = prog.stations || [];
 
             const btns = {};
             (prog.buttons || []).forEach(b => {
@@ -2745,20 +2728,17 @@
                     const pmId = b.ProgrammingModelID;
                     const pm = pmId ? pmDetails[pmId] : null;
 
-                    // Build summary line for header
-                    let summary = '';
-                    if (pm) {
-                        const presetId = pm.PressPresetID || pm.PresetID;
-                        if (presetId) summary = `Press → ${presetLabel(presetId, presetNames)}`;
-                        else if (pm.ControlType !== undefined) summary = `Type:${pm.ControlType}`;
-                    }
+                    // Build label: engraving text > prog type > button name
+                    const engravingLabel = b.EngravingText ? b.EngravingText.replace(/\n/g, ' / ') : null;
+                    const progTypeName = PROG_LABELS[b.ProgModel] || b.ProgModel || '';
+                    const mainLabel = engravingLabel || progTypeName || b.ButtonName;
 
                     html += `<div class="prog-btn-row">
-        <div class="prog-btn-header" onclick="toggleProgDetail('${uid}')">
+        <div class="prog-btn-header" onclick="toggleProgDetail('${uid}')"
+             oncontextmenu="event.preventDefault();event.stopPropagation();showBtnCtxMenu(event,${b.ButtonID})">
           <div class="btn-num">${b.ButtonNumber + 1}</div>
-          <span class="btn-label">${b.ButtonName}</span>
-          ${progTypeBadge(b.ProgModel)}
-          ${summary ? `<span style="font-size:10px;color:var(--text-dim);margin-left:6px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${summary}</span>` : '<span style="flex:1"></span>'}
+          <span class="btn-label">${mainLabel}</span>
+          <span style="font-size:10px;color:var(--text-dim);flex:1"></span>
           <span class="prog-chevron" id="${uid}-chev">▶</span>
         </div>
         <div class="prog-detail" id="${uid}">
@@ -3053,14 +3033,6 @@
             let html = '';
 
             actions.forEach((act, _actIdx) => {
-                // Insert-point divider BEFORE this action (click to insert here)
-                if (act.ActionID && parentTriggerId) {
-                    const _pidIpt = pm ? pm.ProgrammingModelID : null;
-                    html += `<div class="prog-insert-pt" style="padding-left:${pad}px"
-                        title="ここに追加"
-                        onclick="event.stopPropagation();showAddMenu(event,${parentTriggerId},${_pidIpt || 'null'},null,null,${act.ActionID})"></div>`;
-                }
-
                 const delBtn = act.ActionID
                     ? `<button class="prog-del-btn" onclick="event.stopPropagation();deleteAction(${act.ActionID})" title="削除">✕</button>`
                     : '';
@@ -3077,12 +3049,13 @@
                 const dragAttrs = act.ActionID && parentTriggerId
                     ? ` draggable="true" data-action-id="${act.ActionID}" data-trigger-id="${parentTriggerId}" ondragstart="actionDragStart(event,this)" ondragover="actionDragOver(event,this)" ondragleave="actionDragLeave(event,this)" ondrop="actionDrop(event,this)" ondragend="actionDragEnd(event,this)"`
                     : '';
+                const selectAttr = act.ActionID ? ` onclick="selectProgLine(${act.ActionID},event)"` : '';
 
                 if (act.ObjectType === 235) {
                     // Delay
                     const secs = act.DelayTime || 0;
                     const h = Math.floor(secs / 3600), m = Math.floor((secs % 3600) / 60), s = secs % 60;
-                    html += `<div class="prog-line" style="padding-left:${pad}px"${ctxMenu}${dragAttrs}>
+                    html += `<div class="prog-line" style="padding-left:${pad}px"${ctxMenu}${dragAttrs}${selectAttr}>
         <span class="prog-keyword">Delay</span> <span style="color:var(--text-dim)">${h}h ${m}m ${s}s</span>${moreBtn}${addInlineBtn}${delBtn}</div>`;
 
                 } else if (act.ObjectType === 233) {
@@ -3093,8 +3066,17 @@
                     const evals = act.evaluations || [];
                     const condDisplay = renderConditionsHtml(evals, presetNames, pm, act.ActionID);
                     const thenDrop = `<span class="prog-keyword prog-then-drop" onclick="event.stopPropagation();showAddConditionMenu(event,${act.ActionID})" title="条件を追加">Then ▾</span>`;
-                    html += `<div class="prog-line" style="padding-left:${pad}px"${ctxMenu}${dragAttrs}>
-        <span class="prog-keyword">If</span> ${condDisplay} ${thenDrop}${moreBtn}${addInlineBtn}${delBtn}</div>`;
+                    // For If actions: ▼ should insert into the Then branch, not after End If
+                    const thenTrigId = thenBranch[0]?.TriggerID || null;
+                    const firstThenActId = thenBranch[0]?.actions?.[0]?.ActionID || null;
+                    const ifCtxMenu = act.ActionID && parentTriggerId
+                        ? ` oncontextmenu="event.preventDefault();event.stopPropagation();showInsertMenu(event,${parentTriggerId},${act.ActionID},${_pmIdInline || 'null'},${thenTrigId || 'null'},${firstThenActId || 'null'})"`
+                        : '';
+                    const ifMoreBtn = act.ActionID && parentTriggerId
+                        ? `<button class="prog-more-btn" onclick="event.stopPropagation();showInsertMenu(event,${parentTriggerId},${act.ActionID},${_pmIdInline || 'null'},${thenTrigId || 'null'},${firstThenActId || 'null'})" title="前後に追加 / Wrap">⋮</button>`
+                        : '';
+                    html += `<div class="prog-line" style="padding-left:${pad}px"${ifCtxMenu}${dragAttrs}${selectAttr}>
+        <span class="prog-keyword">If</span> ${condDisplay} ${thenDrop}${ifMoreBtn}${addInlineBtn}${delBtn}</div>`;
 
                     // Then branch
                     thenBranch.forEach(st => {
@@ -3130,10 +3112,10 @@
             onchange="changeExecutionType(${act.ActionID},parseInt(this.value))">${execOpts}</select>`
                         : `<span style="color:var(--text-dim)">${EXEC_LABELS[execType] || 'Run'} </span>`;
                     if (act.ActionID) {
-                        html += `<div class="prog-line prog-line-run" style="padding-left:${pad}px"${ctxMenu}${dragAttrs}>
+                        html += `<div class="prog-line prog-line-run" style="padding-left:${pad}px"${ctxMenu}${dragAttrs}${selectAttr}>
           ${execSel}
-          <span class="prog-action" onclick="editRunAction(${act.ActionID},${act.PresetId ?? 'null'},${pmId ?? 'null'})">${label}</span>
-          <span class="prog-edit-hint" onclick="editRunAction(${act.ActionID},${act.PresetId ?? 'null'},${pmId ?? 'null'})">✎</span>
+          <span class="prog-action" onclick="event.stopPropagation();editRunAction(${act.ActionID},${act.PresetId ?? 'null'},${pmId ?? 'null'})">${label}</span>
+          <span class="prog-edit-hint" onclick="event.stopPropagation();editRunAction(${act.ActionID},${act.PresetId ?? 'null'},${pmId ?? 'null'})">✎</span>
           ${moreBtn}${addInlineBtn}${delBtn}
         </div>`;
                     } else {
@@ -3265,12 +3247,12 @@
         }
 
         function _refreshCurrentPanel() {
+            if (activeDetailTab === 'programs') { reloadPrograms(); return; }
             const areaId = _sscAreaId || _ascAreaId;
             if (!areaId) return;
             if (activeDetailTab === 'shared-scenes') loadSharedScenes(areaId);
             else if (activeDetailTab === 'scenes') loadAreaScenes(areaId);
             else if (activeDetailTab === 'zones') {
-                // Re-render zones by re-selecting the area
                 const sel = document.querySelector('.area-item.selected');
                 if (sel) sel.click();
             }
@@ -3284,6 +3266,11 @@
                 e.preventDefault(); _undo();
             } else if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.shiftKey && e.key === 'z'))) {
                 e.preventDefault(); _redo();
+            } else if (e.key === 'Delete' && _selectedActionId) {
+                e.preventDefault(); deleteAction(_selectedActionId);
+            } else if (e.key === 'Escape') {
+                ['scene-picker-overlay', 'btn-copy-picker-overlay', 'delay-picker-overlay']
+                    .forEach(id => document.getElementById(id)?.remove());
             }
         });
 
@@ -3304,6 +3291,7 @@
                 }
             });
             showToast('更新しました');
+            _updateUndoButtons();
         }
 
         // Store current pm_id for scene picker
@@ -4245,7 +4233,7 @@
             setTimeout(() => document.addEventListener('click', () => menu.remove(), { once: true }), 0);
         }
 
-        function showInsertMenu(event, triggerId, actionId, pmId) {
+        function showInsertMenu(event, triggerId, actionId, pmId, thenTriggerId=null, firstThenActionId=null) {
             event.stopPropagation();
             document.querySelectorAll('.add-action-menu').forEach(m => m.remove());
             const menu = document.createElement('div');
@@ -4270,6 +4258,18 @@
                 return el;
             };
 
+            // For If actions (thenTriggerId set): ▼ inserts into Then branch before first Then action
+            // For Run/Delay actions: ▼ inserts after action in parent trigger
+            const downRunFn  = thenTriggerId
+                ? () => doAddRun(thenTriggerId, pmId, null, null, firstThenActionId)
+                : () => doAddRun(triggerId, pmId, null, actionId, null);
+            const downDelayFn = thenTriggerId
+                ? () => doAddDelay(thenTriggerId, null, null, null, firstThenActionId)
+                : () => doAddDelay(triggerId, null, null, actionId, null);
+            const downIfFn   = thenTriggerId
+                ? () => doAddIf(thenTriggerId, pmId, null, null, firstThenActionId)
+                : () => doAddIf(triggerId, pmId, null, actionId, null);
+
             menu.append(
                 head('前に挿入'),
                 item('▲ Run', () => doAddRun(triggerId, pmId, null, null, actionId)),
@@ -4277,9 +4277,9 @@
                 item('▲ If', () => doAddIf(triggerId, pmId, null, null, actionId)),
                 sep(),
                 head('後に挿入'),
-                item('▼ Run', () => doAddRun(triggerId, pmId, null, actionId, null)),
-                item('▼ Delay', () => doAddDelay(triggerId, null, null, actionId, null)),
-                item('▼ If', () => doAddIf(triggerId, pmId, null, actionId, null)),
+                item('▼ Run', downRunFn),
+                item('▼ Delay', downDelayFn),
+                item('▼ If', downIfFn),
                 sep(),
                 item('⬛ If で包む (Wrap in If)', () => doWrapInIf(actionId), 'color:var(--teal)'),
             );
@@ -4320,7 +4320,7 @@
                 const body = { type: 'run', preset_id: presetId };
                 if (insertAfterActionId != null) body.insert_after_action_id = insertAfterActionId;
                 if (insertBeforeActionId != null) body.insert_before_action_id = insertBeforeActionId;
-                const res = await fetch(`/api/trigger/${tid}/add-action`, {
+const res = await fetch(`/api/trigger/${tid}/add-action`, {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(body),
                 });
@@ -4507,12 +4507,106 @@
             await reloadPrograms();
         }
 
+        let _selectedActionId = null;
+        function selectProgLine(actionId, event) {
+            if (_selectedActionId === actionId) return; // already selected, don't re-highlight
+            document.querySelectorAll('.prog-line.prog-selected').forEach(el => el.classList.remove('prog-selected'));
+            _selectedActionId = actionId;
+            const el = event.currentTarget;
+            if (el) el.classList.add('prog-selected');
+        }
+
         async function deleteAction(actionId) {
-            if (!confirm('このアクションを削除しますか？（If文の場合は中のアクションも削除されます）')) return;
             const res = await fetch(`/api/action/${actionId}`, { method: 'DELETE' });
             const d = await res.json();
             if (d.error) { showToast('エラー: ' + d.error); return; }
+            if (_selectedActionId === actionId) _selectedActionId = null;
             await reloadPrograms();
+        }
+
+        function showBtnCtxMenu(event, buttonId) {
+            document.querySelectorAll('.add-action-menu').forEach(m => m.remove());
+            const menu = document.createElement('div');
+            menu.className = 'add-action-menu';
+            const item = (label, fn) => {
+                const el = document.createElement('div');
+                el.textContent = label;
+                el.onclick = () => { menu.remove(); fn(); };
+                return el;
+            };
+            menu.append(
+                item('⤵ このプログラムをコピー', () => showButtonCopyPicker(buttonId)),
+                item('🔍 ボタン名デバッグ', async () => {
+                    const r = await fetch(`/api/button/${buttonId}/debug-schema`);
+                    const d = await r.json();
+                    console.log('Button debug:', d);
+                    const text = JSON.stringify(d, null, 2);
+                    const ov = document.createElement('div');
+                    ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;display:flex;align-items:center;justify-content:center';
+                    ov.innerHTML = `<div style="background:var(--surface1);border-radius:8px;padding:16px;width:600px;max-height:80vh;display:flex;flex-direction:column;gap:8px">
+                      <div style="font-size:12px;color:var(--text-dim)">ボタンデバッグ（全選択してコピー可）</div>
+                      <textarea readonly style="flex:1;min-height:400px;font-size:11px;font-family:monospace;background:var(--surface2);color:var(--text);border:none;border-radius:4px;padding:8px;resize:none">${text}</textarea>
+                      <button onclick="this.closest('div').parentNode.remove()" style="align-self:flex-end;padding:4px 16px;font-size:12px">閉じる</button>
+                    </div>`;
+                    document.body.appendChild(ov);
+                    ov.querySelector('textarea').select();
+                }),
+            );
+            const ex = Math.min(event.clientX, window.innerWidth - 200);
+            const ey = Math.min(event.clientY, window.innerHeight - 80);
+            menu.style.cssText = `top:${ey}px;left:${ex}px`;
+            document.body.appendChild(menu);
+            setTimeout(() => document.addEventListener('click', () => menu.remove(), { once: true }), 0);
+        }
+
+        function showButtonCopyPicker(srcBtnId) {
+            document.getElementById('btn-copy-picker-overlay')?.remove();
+            const stDevMap = {};
+            _progStations.forEach(s => { stDevMap[s.ControlStationDeviceID] = s.StationName; });
+            const btnsMap = {};
+            _progButtons.forEach(b => {
+                if (!btnsMap[b.ParentDeviceID]) btnsMap[b.ParentDeviceID] = [];
+                btnsMap[b.ParentDeviceID].push(b);
+            });
+            let listHtml = '';
+            Object.entries(btnsMap).forEach(([devId, bList]) => {
+                const stName = stDevMap[devId] || `Device ${devId}`;
+                const rows = bList.filter(b => b.ButtonID !== srcBtnId).map(b =>
+                    `<div class="scene-picker-item" onclick="doCopyButton(${srcBtnId},${b.ButtonID})"
+                          style="cursor:pointer;padding:6px 16px;font-size:12px;display:flex;gap:8px;align-items:center">
+                       <span style="background:var(--surface2);color:var(--text-dim);border-radius:3px;padding:1px 6px;font-size:10px;min-width:20px;text-align:center">${b.ButtonNumber + 1}</span>
+                       <span>${b.ButtonName}</span>
+                     </div>`).join('');
+                if (!rows) return;
+                listHtml += `<div style="padding:5px 12px 2px;font-size:10px;color:var(--teal);font-weight:600;text-transform:uppercase;letter-spacing:0.5px">${stName}</div>${rows}`;
+            });
+            const overlay = document.createElement('div');
+            overlay.className = 'scene-picker-overlay';
+            overlay.id = 'btn-copy-picker-overlay';
+            overlay.innerHTML = `
+    <div class="scene-picker-modal" onclick="event.stopPropagation()" style="max-width:340px;height:auto;max-height:420px">
+      <div class="scene-picker-header"><span>⤵ コピー先ボタンを選択</span>
+        <button onclick="document.getElementById('btn-copy-picker-overlay').remove()">✕</button></div>
+      <div class="scene-picker-list" style="max-height:320px">${listHtml ||
+        '<div style="padding:16px;color:var(--text-dim);font-size:12px">他にボタンがありません</div>'}</div>
+      <div class="scene-picker-footer">
+        <button class="btn" style="font-size:11px;padding:4px 10px;background:var(--surface2);color:var(--text-dim)"
+          onclick="document.getElementById('btn-copy-picker-overlay').remove()">キャンセル</button>
+      </div>
+    </div>`;
+            overlay.addEventListener('click', () => overlay.remove());
+            document.body.appendChild(overlay);
+        }
+
+        async function doCopyButton(srcBtnId, tgtBtnId) {
+            document.getElementById('btn-copy-picker-overlay')?.remove();
+            toast('コピー中...');
+            const res = await fetch(`/api/button/${srcBtnId}/copy-to/${tgtBtnId}`, { method: 'POST' });
+            const d = await res.json();
+            console.log('copy-button result:', res.status, d);
+            if (!res.ok || d.error) { toast('エラー: ' + (d.error || `HTTP ${res.status}`), 'red'); return; }
+            await reloadPrograms();
+            toast('コピーしました');
         }
 
         async function showProgSchema() {
