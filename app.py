@@ -2510,6 +2510,48 @@ def add_action_to_trigger(trigger_id):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/action/<int:action_id>/wrap-in-if", methods=["POST"])
+def wrap_action_in_if(action_id):
+    """Wrap an existing action inside a new If statement (Then branch)."""
+    if not state["db_name"]:
+        return jsonify({"error": "DB未接続"}), 400
+    act_rows = _try_q(
+        "SELECT ParentID, ParentType, SortOrder FROM tblAction WHERE ActionID = ?",
+        (action_id,))
+    if not act_rows or act_rows[0].get("__error__"):
+        return jsonify({"error": "アクションが見つかりません"}), 404
+    parent_trigger_id = act_rows[0]["ParentID"]
+    sort_order = act_rows[0]["SortOrder"]
+    try:
+        # Shift the target action and any after it up by 1 to make room for the If
+        execute_sql(
+            "UPDATE tblAction SET SortOrder = SortOrder + 1 "
+            "WHERE ParentID = ? AND ParentType = 232 AND SortOrder >= ?",
+            (parent_trigger_id, sort_order))
+        # Insert new If action at the freed sort position
+        if_action_id = _alloc_and_insert("tblAction", "ActionID", {
+            "ObjectType": 233, "DatabaseRevision": 0,
+            "ParentID": parent_trigger_id, "ParentType": 232,
+            "SortOrder": sort_order,
+            "DelayTime": 0, "ExecutionType": 0, "PresetId": 0,
+            "WhereUsedId": 2147483647,
+        })
+        # Create Then trigger for the new If action
+        then_trigger_id = _alloc_and_insert("tblTrigger", "TriggerID", {
+            "ObjectType": 232, "ParentId": if_action_id, "ParentType": 233,
+            "DatabaseRevision": 0, "SortOrder": 0, "TriggerType": 5,
+            "WhereUsedId": 2147483647,
+        })
+        # Move existing action into the Then trigger
+        execute_sql(
+            "UPDATE tblAction SET ParentID = ?, ParentType = 232, SortOrder = 0 "
+            "WHERE ActionID = ?",
+            (then_trigger_id, action_id))
+        return jsonify({"ok": True, "if_action_id": if_action_id})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/action/<int:action_id>/add-condition", methods=["POST"])
 def add_condition_to_action(action_id):
     """Add an AND/OR condition (ObjectType=236 connector + ObjectType=237 condition) to an If action."""

@@ -802,6 +802,51 @@
             opacity: 1 !important;
         }
 
+        /* ⋮ context menu button */
+        .prog-more-btn {
+            opacity: 0;
+            background: none;
+            border: none;
+            color: var(--text-dim);
+            font-size: 13px;
+            cursor: pointer;
+            padding: 0 3px;
+            line-height: 1;
+            transition: opacity 0.15s, color 0.15s;
+            vertical-align: middle;
+        }
+        .prog-line:hover .prog-more-btn,
+        .prog-line-run:hover .prog-more-btn { opacity: 0.7; }
+        .prog-more-btn:hover { opacity: 1 !important; color: var(--accent) !important; }
+
+        /* Insert-point divider between actions */
+        .prog-insert-pt {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            height: 14px;
+            cursor: pointer;
+            opacity: 0;
+            transition: opacity 0.15s;
+        }
+        .prog-insert-pt:hover { opacity: 1; }
+        .prog-insert-pt::before {
+            content: '＋';
+            font-size: 9px;
+            color: var(--accent);
+            white-space: nowrap;
+        }
+        .prog-insert-pt::after {
+            content: '';
+            flex: 1;
+            height: 1px;
+            background: var(--accent);
+            opacity: 0.4;
+        }
+        /* Always show insert point when parent hovered */
+        .prog-actions:hover .prog-insert-pt { opacity: 0.35; }
+        .prog-actions:hover .prog-insert-pt:hover { opacity: 1; }
+
         /* AND/OR condition connector */
         .prog-connector {
             color: #c586c0;
@@ -929,7 +974,7 @@
             border: 1px solid var(--border);
             border-radius: 8px;
             width: 420px;
-            max-height: 560px;
+            height: 560px;
             display: flex;
             flex-direction: column;
             box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
@@ -1011,6 +1056,34 @@
 
         .scene-picker-item.hidden {
             display: none;
+        }
+
+        .scene-picker-tabs {
+            display: flex;
+            border-bottom: 1px solid var(--border);
+            background: var(--surface2);
+        }
+
+        .scene-picker-tab {
+            flex: 1;
+            padding: 6px 4px;
+            font-size: 11px;
+            text-align: center;
+            cursor: pointer;
+            color: var(--text-dim);
+            border-bottom: 2px solid transparent;
+            transition: color 0.15s, border-color 0.15s;
+            white-space: nowrap;
+        }
+
+        .scene-picker-tab:hover {
+            color: var(--text);
+        }
+
+        .scene-picker-tab.active {
+            color: var(--accent);
+            border-bottom-color: var(--accent);
+            font-weight: 600;
         }
 
         .scene-picker-footer {
@@ -1361,7 +1434,7 @@
 
         #ctx-menu {
             position: fixed; z-index: 9999;
-            background: var(--bg2); border: 1px solid var(--border);
+            background: var(--surface2); border: 1px solid var(--border);
             border-radius: 4px; min-width: 150px;
             box-shadow: 0 4px 12px rgba(0,0,0,.45);
             display: none; padding: 3px 0;
@@ -2799,8 +2872,8 @@
                 } else {
                     html += `<div class="prog-no-data" style="font-size:11px;color:var(--text-dim);padding:4px 0">アクションなし</div>`;
                 }
-                // Bottom add button only for empty panels (non-empty panels use hover inline button)
-                if (!treeActions.length && !fallback) {
+                // Show add button at bottom unless using simple fallback preset (non-trigger mode)
+                if (!fallback) {
                     const addTriggerId = triggerId || null;
                     html += `<div style="padding:2px 0">${renderAddBtn(addTriggerId, pmId, td.key, 0)}</div>`;
                 }
@@ -2965,7 +3038,7 @@
             const pad = depth * 16;
             if (triggerId) {
                 return `<button class="prog-add-btn" style="margin-left:${pad}px"
-      onclick="showAddMenu(event,${triggerId},null)">+ 追加</button>`;
+      onclick="showAddMenu(event,${triggerId},${pmId || 'null'})">+ 追加</button>`;
             } else if (pmId && triggerType) {
                 // No trigger yet — need to create one first
                 return `<button class="prog-add-btn" style="margin-left:${pad}px"
@@ -2979,15 +3052,27 @@
             const pad = depth * 16;
             let html = '';
 
-            actions.forEach(act => {
+            actions.forEach((act, _actIdx) => {
+                // Insert-point divider BEFORE this action (click to insert here)
+                if (act.ActionID && parentTriggerId) {
+                    const _pidIpt = pm ? pm.ProgrammingModelID : null;
+                    html += `<div class="prog-insert-pt" style="padding-left:${pad}px"
+                        title="ここに追加"
+                        onclick="event.stopPropagation();showAddMenu(event,${parentTriggerId},${_pidIpt || 'null'},null,null,${act.ActionID})"></div>`;
+                }
+
                 const delBtn = act.ActionID
                     ? `<button class="prog-del-btn" onclick="event.stopPropagation();deleteAction(${act.ActionID})" title="削除">✕</button>`
                     : '';
+                const _pmIdInline = pm ? pm.ProgrammingModelID : null;
                 const ctxMenu = act.ActionID && parentTriggerId
-                    ? ` oncontextmenu="event.preventDefault();event.stopPropagation();showInsertMenu(event,${parentTriggerId},${act.ActionID})"`
+                    ? ` oncontextmenu="event.preventDefault();event.stopPropagation();showInsertMenu(event,${parentTriggerId},${act.ActionID},${_pmIdInline || 'null'})"`
                     : '';
                 const addInlineBtn = act.ActionID && parentTriggerId
-                    ? `<button class="prog-add-inline" onclick="event.stopPropagation();showAddMenu(event,${parentTriggerId},null,null,${act.ActionID})" title="この下に追加">＋</button>`
+                    ? `<button class="prog-add-inline" onclick="event.stopPropagation();showAddMenu(event,${parentTriggerId},${_pmIdInline || 'null'},null,${act.ActionID})" title="この下に追加">＋</button>`
+                    : '';
+                const moreBtn = act.ActionID && parentTriggerId
+                    ? `<button class="prog-more-btn" onclick="event.stopPropagation();showInsertMenu(event,${parentTriggerId},${act.ActionID},${_pmIdInline || 'null'})" title="前後に追加 / Wrap">⋮</button>`
                     : '';
                 const dragAttrs = act.ActionID && parentTriggerId
                     ? ` draggable="true" data-action-id="${act.ActionID}" data-trigger-id="${parentTriggerId}" ondragstart="actionDragStart(event,this)" ondragover="actionDragOver(event,this)" ondragleave="actionDragLeave(event,this)" ondrop="actionDrop(event,this)" ondragend="actionDragEnd(event,this)"`
@@ -2998,7 +3083,7 @@
                     const secs = act.DelayTime || 0;
                     const h = Math.floor(secs / 3600), m = Math.floor((secs % 3600) / 60), s = secs % 60;
                     html += `<div class="prog-line" style="padding-left:${pad}px"${ctxMenu}${dragAttrs}>
-        <span class="prog-keyword">Delay</span> <span style="color:var(--text-dim)">${h}h ${m}m ${s}s</span>${addInlineBtn}${delBtn}</div>`;
+        <span class="prog-keyword">Delay</span> <span style="color:var(--text-dim)">${h}h ${m}m ${s}s</span>${moreBtn}${addInlineBtn}${delBtn}</div>`;
 
                 } else if (act.ObjectType === 233) {
                     // Conditional If/Then/Else/End If
@@ -3009,13 +3094,12 @@
                     const condDisplay = renderConditionsHtml(evals, presetNames, pm, act.ActionID);
                     const thenDrop = `<span class="prog-keyword prog-then-drop" onclick="event.stopPropagation();showAddConditionMenu(event,${act.ActionID})" title="条件を追加">Then ▾</span>`;
                     html += `<div class="prog-line" style="padding-left:${pad}px"${ctxMenu}${dragAttrs}>
-        <span class="prog-keyword">If</span> ${condDisplay} ${thenDrop}${addInlineBtn}${delBtn}</div>`;
+        <span class="prog-keyword">If</span> ${condDisplay} ${thenDrop}${moreBtn}${addInlineBtn}${delBtn}</div>`;
 
                     // Then branch
                     thenBranch.forEach(st => {
                         html += renderActionList(st.actions, presetNames, depth + 1, pm, st.TriggerID);
-                        if (!st.actions || !st.actions.length)
-                            html += renderAddBtn(st.TriggerID, null, null, depth + 1);
+                        html += renderAddBtn(st.TriggerID, pm ? pm.ProgrammingModelID : null, null, depth + 1);
                     });
 
                     // Else branch
@@ -3023,8 +3107,7 @@
                         html += `<div class="prog-line" style="padding-left:${pad}px"><span class="prog-keyword">Else</span></div>`;
                         elseBranch.forEach(st => {
                             html += renderActionList(st.actions, presetNames, depth + 1, pm, st.TriggerID);
-                            if (!st.actions || !st.actions.length)
-                                html += renderAddBtn(st.TriggerID, null, null, depth + 1);
+                            html += renderAddBtn(st.TriggerID, pm ? pm.ProgrammingModelID : null, null, depth + 1);
                         });
                     } else {
                         html += `<div style="padding-left:${pad}px;padding-top:2px">
@@ -3051,7 +3134,7 @@
           ${execSel}
           <span class="prog-action" onclick="editRunAction(${act.ActionID},${act.PresetId ?? 'null'},${pmId ?? 'null'})">${label}</span>
           <span class="prog-edit-hint" onclick="editRunAction(${act.ActionID},${act.PresetId ?? 'null'},${pmId ?? 'null'})">✎</span>
-          ${addInlineBtn}${delBtn}
+          ${moreBtn}${addInlineBtn}${delBtn}
         </div>`;
                     } else {
                         html += `<div class="prog-line" style="padding-left:${pad}px"${ctxMenu}${dragAttrs}>
@@ -3112,6 +3195,7 @@
         let _sharedScenesCache = null;  // shared scenes (same for all buttons)
         let _localPresetsCache = {};    // pm_id → local presets
         let _scenePickerCallback = null;
+        let _pickerActiveTab = 'shared'; // 'shared' | 'btnprog'
 
         async function loadScenes(pmId) {
             // Fetch shared scenes if not cached
@@ -3222,12 +3306,15 @@
             showToast('更新しました');
         }
 
-        // Store current pm_id for filtering
+        // Store current pm_id for scene picker
         let _currentPickerPmId = null;
+        let _pickerCurrentPresetId = null;
 
         function showScenePicker(title, currentPresetId, pmId, callback) {
             _scenePickerCallback = callback;
             _currentPickerPmId = pmId || null;
+            _pickerCurrentPresetId = currentPresetId;
+            _pickerActiveTab = 'shared';
             const overlay = document.createElement('div');
             overlay.className = 'scene-picker-overlay';
             overlay.id = 'scene-picker-overlay';
@@ -3236,6 +3323,10 @@
       <div class="scene-picker-header">
         <span>${title}</span>
         <button onclick="document.getElementById('scene-picker-overlay').remove()">✕</button>
+      </div>
+      <div class="scene-picker-tabs" id="scene-picker-tabs">
+        <div class="scene-picker-tab" id="sptab-btnprog" onclick="_switchPickerTab('btnprog')">ボタンプログラム</div>
+        <div class="scene-picker-tab active" id="sptab-shared" onclick="_switchPickerTab('shared')">共有シーン</div>
       </div>
       <input class="scene-picker-search" type="text" placeholder="🔍 検索..." oninput="filterScenesList(this.value)" autofocus>
       <div class="scene-picker-list" id="scene-picker-list"><div style="padding:16px;color:var(--text-dim);font-size:12px">読み込み中...</div></div>
@@ -3246,59 +3337,74 @@
     </div>`;
             overlay.addEventListener('click', () => overlay.remove());
             document.body.appendChild(overlay);
-            loadScenes(_currentPickerPmId).then(data => renderScenePickerList(data, currentPresetId));
+            loadScenes(_currentPickerPmId).then(data => {
+                _pickerData = data;
+                renderScenePickerList(data, currentPresetId);
+            });
+        }
+
+        let _pickerData = null;
+
+        function _switchPickerTab(tab) {
+            _pickerActiveTab = tab;
+            document.querySelectorAll('.scene-picker-tab').forEach(el => el.classList.remove('active'));
+            const tabEl = document.getElementById(`sptab-${tab}`);
+            if (tabEl) tabEl.classList.add('active');
+            const searchEl = document.querySelector('.scene-picker-search');
+            const filter = searchEl ? searchEl.value : '';
+            if (_pickerData) renderScenePickerList(_pickerData, _pickerCurrentPresetId, filter);
         }
 
         function renderScenePickerList(data, currentPresetId, filter) {
             const list = document.getElementById('scene-picker-list');
             if (!list) return;
             const q = (filter || '').toLowerCase();
-            const { shared = [], local = [] } = data;
-
-            const matchItem = (name, group) => !q || `${name} ${group}`.toLowerCase().includes(q);
-
+            const { shared = [], local = [], btnprog = [] } = data;
+            const matchItem = (...parts) => !q || parts.join(' ').toLowerCase().includes(q);
             let html = '';
 
-            // Button-local presets first (if any)
-            if (local.length) {
-                const vis = local.filter(p => matchItem(p.Name || '', 'ボタンアクション'));
-                if (vis.length) {
-                    html += `<div class="scene-picker-group">ボタンアクション</div>`;
-                    vis.forEach(p => {
-                        const name = p.Name || `Preset ${p.PresetID}`;
-                        const isCur = p.PresetID === currentPresetId;
+            if (_pickerActiveTab === 'shared') {
+                // Shared scenes grouped by area
+                const groups = {};
+                shared.forEach(s => {
+                    const key = s.AreaName || '(その他)';
+                    if (!groups[key]) groups[key] = [];
+                    groups[key].push(s);
+                });
+                Object.entries(groups).forEach(([area, items]) => {
+                    const vis = items.filter(s => matchItem(s.Name || '', area));
+                    if (!vis.length) return;
+                    html += `<div class="scene-picker-group">共有シーン — ${area}</div>`;
+                    vis.forEach(s => {
+                        const name = s.Name || `Preset ${s.PresetID}`;
+                        const isCur = s.PresetID === currentPresetId;
                         html += `<div class="scene-picker-item ${isCur ? 'is-current' : ''}"
-          onclick="selectScene(${p.PresetID}, '${name.replace(/'/g, "\\'")}')">
+          onclick="selectScene(${s.PresetID}, '${name.replace(/'/g, "\\'")}')">
           ${isCur ? '● ' : ''}${name}</div>`;
                     });
-                }
-            }
-
-            // Shared scenes grouped by area
-            const groups = {};
-            shared.forEach(s => {
-                const key = s.AreaName || '(その他)';
-                if (!groups[key]) groups[key] = [];
-                groups[key].push(s);
-            });
-            Object.entries(groups).forEach(([area, items]) => {
-                const vis = items.filter(s => matchItem(s.Name || '', area));
-                if (!vis.length) return;
-                html += `<div class="scene-picker-group">共有シーン — ${area}</div>`;
-                vis.forEach(s => {
-                    const name = s.Name || `Preset ${s.PresetID}`;
-                    const isCur = s.PresetID === currentPresetId;
-                    html += `<div class="scene-picker-item ${isCur ? 'is-current' : ''}"
-        onclick="selectScene(${s.PresetID}, '${name.replace(/'/g, "\\'")}')">
-        ${isCur ? '● ' : ''}${name}</div>`;
                 });
-            });
+
+            } else if (_pickerActiveTab === 'btnprog') {
+                // Button programs = local presets for this button's PM (same as Actions tab)
+                const vis = local.filter(p => matchItem(p.Name || ''));
+                vis.forEach(p => {
+                    const name = p.Name || `Preset ${p.PresetID}`;
+                    const isCur = p.PresetID === currentPresetId;
+                    html += `<div class="scene-picker-item ${isCur ? 'is-current' : ''}"
+          onclick="selectScene(${p.PresetID}, '${name.replace(/'/g, "\\'")}')">
+          ${isCur ? '● ' : ''}${name}</div>`;
+                });
+            }
 
             list.innerHTML = html || '<div style="padding:16px;color:var(--text-dim);font-size:12px">見つかりません</div>';
         }
 
         function filterScenesList(value) {
-            loadScenes(_currentPickerPmId).then(data => renderScenePickerList(data, null, value));
+            if (_pickerData) renderScenePickerList(_pickerData, _pickerCurrentPresetId, value);
+            else loadScenes(_currentPickerPmId).then(data => {
+                _pickerData = data;
+                renderScenePickerList(data, _pickerCurrentPresetId, value);
+            });
         }
 
         function selectScene(sceneId, sceneName) {
@@ -4117,15 +4223,15 @@
 
         // ── Add / Delete actions ──────────────────────
 
-        function showAddMenu(event, triggerId, pmId, triggerType, insertAfterActionId = null) {
+        function showAddMenu(event, triggerId, pmId, triggerType, insertAfterActionId = null, insertBeforeActionId = null) {
             event.stopPropagation();
             document.querySelectorAll('.add-action-menu').forEach(m => m.remove());
             const menu = document.createElement('div');
             menu.className = 'add-action-menu';
             const items = [
-                { label: 'Run (シーン実行)', fn: () => doAddRun(triggerId, pmId, triggerType, insertAfterActionId, null) },
-                { label: 'Delay', fn: () => doAddDelay(triggerId, pmId, triggerType, insertAfterActionId, null) },
-                { label: 'If (条件分岐)', fn: () => doAddIf(triggerId, pmId, triggerType, insertAfterActionId, null) },
+                { label: 'Run (シーン実行)', fn: () => doAddRun(triggerId, pmId, triggerType, insertAfterActionId, insertBeforeActionId) },
+                { label: 'Delay', fn: () => doAddDelay(triggerId, pmId, triggerType, insertAfterActionId, insertBeforeActionId) },
+                { label: 'If (条件分岐)', fn: () => doAddIf(triggerId, pmId, triggerType, insertAfterActionId, insertBeforeActionId) },
             ];
             items.forEach(item => {
                 const div = document.createElement('div');
@@ -4139,33 +4245,49 @@
             setTimeout(() => document.addEventListener('click', () => menu.remove(), { once: true }), 0);
         }
 
-        function showInsertMenu(event, triggerId, actionId) {
+        function showInsertMenu(event, triggerId, actionId, pmId) {
             event.stopPropagation();
             document.querySelectorAll('.add-action-menu').forEach(m => m.remove());
             const menu = document.createElement('div');
             menu.className = 'add-action-menu';
-            const items = [
-                { label: '▲ Run を前に挿入', fn: () => doAddRun(triggerId, null, null, null, actionId) },
-                { label: '▲ Delay を前に挿入', fn: () => doAddDelay(triggerId, null, null, null, actionId) },
-                { label: '▲ If を前に挿入', fn: () => doAddIf(triggerId, null, null, null, actionId) },
-                { label: null },
-                { label: '▼ Run を後に挿入', fn: () => doAddRun(triggerId, null, null, actionId, null) },
-                { label: '▼ Delay を後に挿入', fn: () => doAddDelay(triggerId, null, null, actionId, null) },
-                { label: '▼ If を後に挿入', fn: () => doAddIf(triggerId, null, null, actionId, null) },
-            ];
-            items.forEach(item => {
-                if (!item.label) {
-                    const sep = document.createElement('div');
-                    sep.style.cssText = 'height:1px;background:rgba(255,255,255,0.1);margin:2px 0;pointer-events:none';
-                    menu.appendChild(sep);
-                    return;
-                }
-                const div = document.createElement('div');
-                div.textContent = item.label;
-                div.onclick = () => { menu.remove(); item.fn(); };
-                menu.appendChild(div);
-            });
-            menu.style.cssText = `top:${event.clientY}px;left:${event.clientX}px`;
+
+            const sep = () => {
+                const el = document.createElement('div');
+                el.style.cssText = 'height:1px;background:rgba(255,255,255,0.1);margin:2px 0;pointer-events:none';
+                return el;
+            };
+            const item = (label, fn, style) => {
+                const el = document.createElement('div');
+                el.textContent = label;
+                if (style) el.style.cssText = style;
+                el.onclick = () => { menu.remove(); fn(); };
+                return el;
+            };
+            const head = (label) => {
+                const el = document.createElement('div');
+                el.textContent = label;
+                el.style.cssText = 'padding:3px 12px 1px;font-size:9px;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.6px;pointer-events:none';
+                return el;
+            };
+
+            menu.append(
+                head('前に挿入'),
+                item('▲ Run', () => doAddRun(triggerId, pmId, null, null, actionId)),
+                item('▲ Delay', () => doAddDelay(triggerId, null, null, null, actionId)),
+                item('▲ If', () => doAddIf(triggerId, pmId, null, null, actionId)),
+                sep(),
+                head('後に挿入'),
+                item('▼ Run', () => doAddRun(triggerId, pmId, null, actionId, null)),
+                item('▼ Delay', () => doAddDelay(triggerId, null, null, actionId, null)),
+                item('▼ If', () => doAddIf(triggerId, pmId, null, actionId, null)),
+                sep(),
+                item('⬛ If で包む (Wrap in If)', () => doWrapInIf(actionId), 'color:var(--teal)'),
+            );
+
+            // Smart positioning
+            const ex = Math.min(event.clientX, window.innerWidth - 180);
+            const ey = Math.min(event.clientY, window.innerHeight - 320);
+            menu.style.cssText = `top:${ey}px;left:${ex}px`;
             document.body.appendChild(menu);
             setTimeout(() => document.addEventListener('click', () => menu.remove(), { once: true }), 0);
         }
@@ -4180,6 +4302,14 @@
             const d = await res.json();
             if (d.error) { showToast('エラー: ' + d.error); return null; }
             return d.trigger_id;
+        }
+
+        async function doWrapInIf(actionId) {
+            const res = await fetch(`/api/action/${actionId}/wrap-in-if`, { method: 'POST' });
+            const d = await res.json();
+            if (d.error) { showToast('エラー: ' + d.error); return; }
+            await reloadPrograms();
+            showToast('If で包みました。条件をクリックして設定してください。');
         }
 
         function doAddRun(triggerId, pmId, triggerType, insertAfterActionId = null, insertBeforeActionId = null) {
