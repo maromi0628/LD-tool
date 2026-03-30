@@ -2914,6 +2914,7 @@
 
             const pmDetails = prog.pm_details || {};
             const presetNames = prog.preset_names || {};
+            window._currentPresetNames = presetNames;
             const trigTrees = prog.trigger_trees || {};
             _currentTrigTrees = trigTrees;
 
@@ -3488,6 +3489,60 @@
                     .forEach(id => document.getElementById(id)?.remove());
             }
         });
+
+        document.addEventListener('copy', (e) => {
+            const tag = (e.target || {}).tagName || '';
+            if (['INPUT', 'TEXTAREA', 'SELECT'].includes(tag)) return;
+
+            if (_selectedActionIds.size > 0) {
+                const orderedIds = [...document.querySelectorAll('.prog-line[data-action-id]')]
+                    .map(el => parseInt(el.dataset.actionId))
+                    .filter(id => _selectedActionIds.has(id));
+                const actions = orderedIds.map(id => _findActionById(id)).filter(Boolean);
+                if (!actions.length) return;
+
+                // Sync internal clipboard
+                _actionClipboard = { actions, sourcePmId: null };
+
+                // Build text representation
+                const presetNames = window._currentPresetNames || {};
+                const text = actions.map(act => _actionToText(act, 0, presetNames)).join('\n');
+                e.clipboardData.setData('text/plain', text);
+                e.preventDefault();
+                showToast(`${actions.length}件のアクションをコピーしました`);
+            }
+        });
+
+        function _actionToText(act, depth, presetNames) {
+            const pad = '  '.repeat(depth);
+            if (act.ObjectType === 235) { // Delay
+                const secs = act.DelayTime || 0;
+                const h = Math.floor(secs / 3600), m = Math.floor((secs % 3600) / 60), s = secs % 60;
+                return `${pad}Delay ${h}h ${m}m ${s}s`;
+            } else if (act.ObjectType === 233) { // If
+                const evals = act.evaluations || [];
+                const condStr = evals.filter(e => e.ObjectType !== 236)
+                    .map(e => buildSingleConditionText(e, presetNames)).join(' and ');
+                let res = `${pad}If ${condStr || 'true'} Then`;
+                (act.sub_triggers || []).forEach(st => {
+                    if (st.TriggerType === 5 && st.actions.length) {
+                        res += '\n' + st.actions.map(a => _actionToText(a, depth + 1, presetNames)).join('\n');
+                    } else if (st.TriggerType === 6) {
+                        res += `\n${pad}Else`;
+                        if (st.actions.length) {
+                            res += '\n' + st.actions.map(a => _actionToText(a, depth + 1, presetNames)).join('\n');
+                        }
+                    }
+                });
+                res += `\n${pad}End If`;
+                return res;
+            } else { // Run / Stop / etc
+                const label = presetLabel(act.PresetId, presetNames);
+                const EXEC_LABELS = { 1: 'Run', 2: 'Raise', 3: 'Lower', 4: 'Stop' };
+                const type = EXEC_LABELS[act.ExecutionType || 1] || 'Run';
+                return `${pad}${type} ${label}`;
+            }
+        }
 
         async function reloadPrograms() {
             if (!currentAreaId) return;
