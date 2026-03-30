@@ -633,6 +633,7 @@
         .prog-actions .prog-line {
             padding: 1px 0;
             user-select: text;
+            cursor: text;
         }
 
         .prog-actions .prog-keyword {
@@ -660,7 +661,6 @@
 
         /* Editable program lines */
         .prog-line-run {
-            cursor: pointer;
             border-radius: 3px;
             transition: background 0.1s;
         }
@@ -739,9 +739,9 @@
             color: var(--text-dim);
             font-size: 10px;
             border-radius: 3px;
-            padding: 1px 8px;
+            padding: 1px 12px;
             cursor: pointer;
-            margin-top: 2px;
+            margin-top: 5px;
             transition: all 0.15s;
         }
 
@@ -2733,18 +2733,36 @@
 
         function progLineMousedown(event, actionId, triggerId) {
             if (event.button !== 0) return;
-            if (event.target.closest('button, select, .prog-grip, .prog-action, .prog-edit-hint, .prog-then-drop')) return;
-            if (event.shiftKey && _selectionAnchor !== null) {
-                _rangeSelectTo(actionId);
-            } else if (event.ctrlKey || event.metaKey) {
-                if (_selectedActionIds.has(actionId)) _selectedActionIds.delete(actionId);
-                else { _selectedActionIds.add(actionId); _selectionAnchor = actionId; }
+            const target = event.target;
+            const isGrip = !!target.closest('.prog-grip');
+            const isModifier = event.shiftKey || event.ctrlKey || event.metaKey;
+
+            // Don't intercept clicks on logic UI elements unless modifiers/grip are used
+            if (!isGrip && !isModifier && target.closest('button, select, .prog-action, .prog-edit-hint, .prog-then-drop, .prog-condition, .prog-connector')) return;
+
+            if (isGrip || isModifier) {
+                if (event.shiftKey && _selectionAnchor !== null) {
+                    _rangeSelectTo(actionId);
+                } else if (event.ctrlKey || event.metaKey) {
+                    if (_selectedActionIds.has(actionId)) _selectedActionIds.delete(actionId);
+                    else { _selectedActionIds.add(actionId); _selectionAnchor = actionId; }
+                    _isMouseSelecting = true;
+                } else {
+                    _selectedActionIds = new Set([actionId]);
+                    _selectionAnchor = actionId;
+                    _isMouseSelecting = true;
+                }
+                _updateSelectionHighlight();
             } else {
-                _selectedActionIds = new Set([actionId]);
+                // Standard drag (without modifiers) should do standard text selection
+                _isMouseSelecting = false;
+                // If it wasn't selected, clear highlights to minimize clutter during text selection
+                if (!_selectedActionIds.has(actionId)) {
+                    _selectedActionIds = new Set();
+                    _updateSelectionHighlight();
+                }
                 _selectionAnchor = actionId;
-                _isMouseSelecting = true;
             }
-            _updateSelectionHighlight();
         }
 
         function _rangeSelectTo(actionId) {
