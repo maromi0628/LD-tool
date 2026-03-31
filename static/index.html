@@ -2730,6 +2730,19 @@
             _updateSelectionHighlight();
         }
 
+        // Click on program area background (outside all prog-lines) deselects
+        document.addEventListener('mousedown', (e) => {
+            if (!_selectedActionIds.size) return;
+            if (e.target.closest('.prog-line[data-action-id]')) return;
+            if (e.target.closest('#prog-sel-bar')) return;
+            if (e.target.closest('.add-action-menu')) return;
+            if (e.target.closest('.prog-actions')) {
+                _selectedActionIds = new Set();
+                _selectionAnchor = null;
+                _updateSelectionHighlight();
+            }
+        });
+
         let _preventNextClick = false;
 
         function progLineMousedown(event, actionId, triggerId) {
@@ -2774,6 +2787,13 @@
             document.querySelectorAll('.prog-line[data-action-id]').forEach(el => {
                 el.classList.toggle('prog-selected', _selectedActionIds.has(parseInt(el.dataset.actionId)));
             });
+            const bar = document.getElementById('prog-sel-bar');
+            if (bar) {
+                const n = _selectedActionIds.size;
+                bar.style.display = n > 0 ? 'flex' : 'none';
+                const cnt = document.getElementById('prog-sel-count');
+                if (cnt) cnt.textContent = `${n}行選択中`;
+            }
         }
 
         function _findActionById(actionId, trees) {
@@ -2798,6 +2818,22 @@
                 }
             }
             return null;
+        }
+
+        function _selBarCopy() { _copySelectedLinesToClipboard(); }
+        function _selBarClear() { _selectedActionIds = new Set(); _selectionAnchor = null; _updateSelectionHighlight(); }
+        async function _selBarDelete() {
+            const ids = [...document.querySelectorAll('.prog-line[data-action-id]')]
+                .map(el => parseInt(el.dataset.actionId))
+                .filter(id => _selectedActionIds.has(id));
+            if (!ids.length) return;
+            if (ids.length > 1 && !confirm(`${ids.length}件のアクションを削除しますか？`)) return;
+            for (const id of ids) {
+                await fetch(`/api/action/${id}`, { method: 'DELETE' });
+            }
+            _selectedActionIds = new Set();
+            _selectionAnchor = null;
+            await reloadPrograms();
         }
 
         function copySelectedActions(pmId) {
@@ -2932,7 +2968,13 @@
             const trigTrees = prog.trigger_trees || {};
             _currentTrigTrees = trigTrees;
 
-            let html = `<div style="padding:4px 12px;font-size:10px;color:var(--text-dim);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px">
+            let html = `<div id="prog-sel-bar" style="display:none;position:sticky;top:0;z-index:10;background:var(--surface, #1e2025);border-bottom:1px solid var(--border);padding:4px 12px;align-items:center;gap:8px;font-size:11px">
+    <span id="prog-sel-count" style="color:var(--accent);font-weight:600"></span>
+    <button class="btn btn-outline" style="padding:1px 8px;font-size:10px" onclick="_selBarCopy()">📋 コピー</button>
+    <button class="btn btn-outline" style="padding:1px 8px;font-size:10px;color:#f88" onclick="_selBarDelete()">🗑 削除</button>
+    <button class="btn btn-outline" style="padding:1px 8px;font-size:10px" onclick="_selBarClear()">✕ 解除</button>
+  </div>
+  <div style="padding:4px 12px;font-size:10px;color:var(--text-dim);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px">
     <span style="margin-left:auto"></span>
     <button class="btn btn-outline" style="padding:1px 8px;font-size:10px" onclick="showProgSchema()">🔍 DB Schema</button>
   </div>`;
@@ -3499,8 +3541,10 @@
             } else if ((e.ctrlKey || e.metaKey) && e.key === 'c' && _selectedActionIds.size > 0) {
                 e.preventDefault();
                 _copySelectedLinesToClipboard();
-            } else if (e.key === 'Delete' && _selectedActionIds.size === 1) {
-                e.preventDefault(); deleteAction([..._selectedActionIds][0]);
+            } else if (e.key === 'Delete' && _selectedActionIds.size > 0) {
+                e.preventDefault();
+                if (_selectedActionIds.size === 1) deleteAction([..._selectedActionIds][0]);
+                else _selBarDelete();
             } else if (e.key === 'Escape') {
                 _selectedActionIds = new Set();
                 _updateSelectionHighlight();
@@ -3628,6 +3672,7 @@
             });
             showToast('更新しました');
             _updateUndoButtons();
+            _updateSelectionHighlight();
         }
 
         // Store current pm_id for scene picker

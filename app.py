@@ -2601,6 +2601,144 @@ def add_action_to_trigger(trigger_id):
         return jsonify({"error": str(e)}), 500
 
 
+def _paste_action_tree(actions, trigger_id, source_pm_id, target_pm_id, start_sort=0, _collected=None):
+    """Recursively insert a copied action tree with local-preset remapping.
+    _collected: list to append (table, id_col, new_id, row_dict) for each inserted row.
+    Returns _collected so the caller can build undo/redo SQL."""
+    if _collected is None:
+        _collected = []
+
+    def _record(table, id_col, new_id, row):
+        _collected.append((table, id_col, new_id, dict(row)))
+        return new_id
+
+    for i, act in enumerate(actions):
+        sort_order = start_sort + i
+        obj_type = act.get("ObjectType")
+
+        if obj_type == 235:  # Delay
+            row = {"ObjectType": 235, "DatabaseRevision": 0,
+                   "ParentID": trigger_id, "ParentType": 232, "SortOrder": sort_order,
+                   "DelayTime": act.get("DelayTime") or 0, "ExecutionType": 0,
+                   "PresetId": 0, "WhereUsedId": 2147483647}
+            _record("tblAction", "ActionID", _alloc_and_insert("tblAction", "ActionID", row), row)
+
+        elif obj_type == 233:  # If/Conditional
+            row = {"ObjectType": 233, "DatabaseRevision": 0,
+                   "ParentID": trigger_id, "ParentType": 232, "SortOrder": sort_order,
+                   "DelayTime": 0, "ExecutionType": 0, "PresetId": 0,
+                   "WhereUsedId": 2147483647}
+            new_act_id = _alloc_and_insert("tblAction", "ActionID", row)
+            _record("tblAction", "ActionID", new_act_id, row)
+            for ev in (act.get("evaluations") or []):
+                ev_row = {
+                    "ObjectType": ev.get("ObjectType", 237), "DatabaseRevision": 0,
+                    "ParentID": new_act_id, "ParentType": 233,
+                    "SortOrder": ev.get("SortOrder", 0),
+                    "EvaluationOperator": ev.get("EvaluationOperator", 3),
+                    "FirstOperandObjectID": ev.get("FirstOperandObjectID", 0),
+                    "FirstOperandObjectType": ev.get("FirstOperandObjectType", 0),
+                    "FirstOperandRefProperty": ev.get("FirstOperandRefProperty", 0),
+                    "SecondOperand": ev.get("SecondOperand", 0),
+                    "ConditionType": ev.get("ConditionType", 23),
+                    "ThirdOperand": ev.get("ThirdOperand", 0),
+                    "WhereUsedId": 2147483647,
+                }
+                _record("tblEvaluation", "EvaluationID",
+                        _alloc_and_insert("tblEvaluation", "EvaluationID", ev_row), ev_row)
+            for j, st in enumerate(act.get("sub_triggers") or []):
+                st_row = {"ObjectType": 232, "ParentId": new_act_id, "ParentType": 233,
+                          "DatabaseRevision": 0, "SortOrder": j,
+                          "TriggerType": st["TriggerType"], "WhereUsedId": 2147483647}
+                new_st_id = _alloc_and_insert("tblTrigger", "TriggerID", st_row)
+                _record("tblTrigger", "TriggerID", new_st_id, st_row)
+                _paste_action_tree(
+                    st.get("actions") or [], new_st_id, source_pm_id, target_pm_id, 0, _collected
+                )
+
+        else:  # Run (234) or unknown
+            preset_id = act.get("PresetId") or 0
+            if preset_id and source_pm_id and target_pm_id and source_pm_id != target_pm_id:
+                r = _try_q(
+                    "SELECT ParentType FROM tblPreset WHERE PresetID = ?", (preset_id,))
+                if r and not r[0].get("__error__") and r[0].get("ParentType") == 231:
+                    preset_id = 0  # local preset from a different PM — clear it
+            row = {"ObjectType": obj_type or 234, "DatabaseRevision": 0,
+                   "ParentID": trigger_id, "ParentType": 232, "SortOrder": sort_order,
+                   "DelayTime": 0, "ExecutionType": act.get("ExecutionType") or 1,
+                   "PresetId": preset_id, "WhereUsedId": 2147483647}
+            _record("tblAction", "ActionID", _alloc_and_insert("tblAction", "ActionID", row), row)
+
+    return _collected
+
+
+@app.route("/api/trigger/<int:trigger_id>/paste-actions", methods=["POST"])
+def paste_actions_to_trigger(trigger_id):
+    """Paste a copied action tree into a trigger at a specified position."""
+    if not state["db_name"]:
+        return jsonify({"error": "DB未接続"}), 400
+    data = request.json or {}
+    actions = data.get("actions") or []
+    source_pm_id = data.get("source_pm_id")
+    target_pm_id = data.get("target_pm_id")
+    insert_after_id = data.get("insert_after_action_id")
+    insert_before_id = data.get("insert_before_action_id")
+    if not actions:
+        return jsonify({"error": "アクションなし"}), 400
+    try:
+        sort = _next_sort_order_action(trigger_id)
+        insert_sort = None
+        shift_count = len(actions)
+        if insert_after_id is not None or insert_before_id is not None:
+            ref_id = insert_after_id if insert_after_id is not None else insert_before_id
+            ref_rows = _try_q(
+                "SELECT SortOrder FROM tblAction WHERE ActionID = ?", (ref_id,))
+            if ref_rows and not ref_rows[0].get("__error__") and \
+                    ref_rows[0].get("SortOrder") is not None:
+                ref_sort = ref_rows[0]["SortOrder"]
+                insert_sort = ref_sort + 1 if insert_after_id is not None else ref_sort
+                execute_sql(
+                    "UPDATE tblAction SET SortOrder = SortOrder + ? "
+                    "WHERE ParentID = ? AND ParentType = 232 AND SortOrder >= ?",
+                    (shift_count, trigger_id, insert_sort)
+                )
+                sort = insert_sort
+
+        collected = _paste_action_tree(actions, trigger_id, source_pm_id, target_pm_id, sort)
+
+        # Build undo SQL: delete inserted rows (child-first = reverse insertion order),
+        # then restore the SortOrder shift if one was applied.
+        undo_sqls = []
+        for table, id_col, new_id, _ in reversed(collected):
+            undo_sqls.append((f"DELETE FROM {table} WHERE {id_col} = ?", (new_id,)))
+        if insert_sort is not None:
+            undo_sqls.append((
+                "UPDATE tblAction SET SortOrder = SortOrder - ? "
+                "WHERE ParentID = ? AND ParentType = 232 AND SortOrder >= ?",
+                (shift_count, trigger_id, insert_sort)
+            ))
+
+        # Build redo SQL: re-apply SortOrder shift, then re-insert rows with their original IDs.
+        redo_sqls = []
+        if insert_sort is not None:
+            redo_sqls.append((
+                "UPDATE tblAction SET SortOrder = SortOrder + ? "
+                "WHERE ParentID = ? AND ParentType = 232 AND SortOrder >= ?",
+                (shift_count, trigger_id, insert_sort)
+            ))
+        for table, id_col, new_id, row in collected:
+            cols = [id_col] + list(row.keys())
+            vals = [new_id] + list(row.values())
+            col_str = ", ".join(cols)
+            ph_str = ", ".join("?" * len(vals))
+            redo_sqls.append((f"INSERT INTO {table} ({col_str}) VALUES ({ph_str})", tuple(vals)))
+
+        push_undo(undo_sqls, redo_sqls, "ペースト")
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/action/<int:action_id>/wrap-in-if", methods=["POST"])
 def wrap_action_in_if(action_id):
     """Wrap an existing action inside a new If statement (Then branch)."""
